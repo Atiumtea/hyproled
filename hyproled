@@ -182,7 +182,7 @@ notify_waybar() {
     [[ "$process_name" == "waybar" ]] || continue
 
     caught=""
-    while read -r key value _; do
+    while IFS=$' \t' read -r key value _; do
       if [[ "$key" == "SigCgt:" ]]; then
         caught="$value"
         break
