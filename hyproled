@@ -1,103 +1,312 @@
-#!/bin/bash
-shift=false; invert=false; monitor=0; off_pixels=1
-fill_color='0.0,0.0,0.0,1.0'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
 
-STATE_FILE="/dev/shm/hyproled_shift.state"
-SHADER_FILE="/dev/shm/hyproled_shader.glsl"
+VERSION="0.3.0-dev"
+DEFAULT_BRIGHTNESS_DEVICE="intel_backlight"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+STATE_DIR="$RUNTIME_DIR/hyproled"
+STATE_FILE="$STATE_DIR/state.json"
+LOCK_FILE="$STATE_DIR/lock"
 
-# Allow running outside a Hyprland session (e.g. from cron or systemd timers).
-# hyprctl refuses to talk to the compositor without these variables and still
-# exits 0 on failure, so fall back to the runtime dir and auto-detect the
-# instance (the first one with a live IPC socket, skipping stale leftovers).
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-  for sock in "$XDG_RUNTIME_DIR"/hypr/*/.socket.sock; do
-    [[ -S $sock ]] || continue
-    sig=${sock%/.socket.sock}
-    export HYPRLAND_INSTANCE_SIGNATURE="${sig##*/}"
-    break
+SHIFT=false
+AREA_SET=false
+INVERT_SET=false
+OFF_PIXELS_SET=false
+MONITOR_SET=false
+CLI_AREA=""
+CLI_INVERT=false
+CLI_OFF_PIXELS=1
+CLI_MONITOR=0
+
+show_help() {
+  cat <<EOF_HELP
+Usage: $(basename "$0") [OPTION]... [off]
+
+Hyprland screen-shader utility for OLED pixel refresh / burn-in mitigation.
+
+version: $VERSION
+
+Options:
+  -a x:y:w:h  Apply the effect only to this area.
+  -i          Invert the selected area.
+  -o N        Number of disabled pixels in each 2x2 block (1-3).
+  -s          Rotate the active 2x2 pattern by one phase.
+  -m ID       Hyprland monitor ID (default: 0).
+  -h          Show this help.
+
+Argument:
+  off         Disable the effect and restore pre-activation brightness,
+              adjusted by any net brightness change made while active.
+
+Environment:
+  HYPROLED_BRIGHTNESS_DEVICE  brightnessctl device (default: intel_backlight)
+EOF_HELP
+}
+
+die() { printf 'hyproled: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'hyproled: warning: %s\n' "$*" >&2; }
+need_command() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+
+ACTION="enable"
+if [[ ${1:-} == "off" ]]; then
+  [[ $# -eq 1 ]] || die "'off' does not accept additional arguments"
+  ACTION="off"
+else
+  OPTIND=1
+  while getopts ":a:io:sm:h" opt; do
+    case "$opt" in
+      a) CLI_AREA="$OPTARG"; AREA_SET=true ;;
+      i) CLI_INVERT=true; INVERT_SET=true ;;
+      o) CLI_OFF_PIXELS="$OPTARG"; OFF_PIXELS_SET=true ;;
+      s) SHIFT=true ;;
+      m) CLI_MONITOR="$OPTARG"; MONITOR_SET=true ;;
+      h) show_help; exit 0 ;;
+      :) die "option -$OPTARG requires an argument" ;;
+      \?) show_help; die "unknown option: -$OPTARG" ;;
+    esac
   done
+  shift $((OPTIND - 1))
+  [[ $# -eq 0 ]] || die "unexpected argument: $1"
 fi
 
-# Detect hyprland version and whether eval (Lua config manager) is supported.
-# hyprctl eval requires both Hyprland >= 0.55 AND the Lua config manager.
-# hyprctl exits 0 even when eval is unsupported, so check the output directly.
-_HYPR_VERSION=$(hyprctl version 2>/dev/null)
-if [[ $_HYPR_VERSION != *Hyprland* ]]; then
-  echo "hyproled: cannot connect to a running Hyprland instance" >&2; exit 1
-fi
-_HYPR_MINOR=$(grep -oP 'Hyprland 0\.\K[0-9]+' <<< "$_HYPR_VERSION")
-_USE_EVAL=false
-if (( _HYPR_MINOR >= 55 )); then
-  if ! hyprctl eval '' 2>&1 | grep -q 'only supported with the lua config manager'; then
-    _USE_EVAL=true
+if [[ "$ACTION" == "enable" ]]; then
+  if [[ "$SHIFT" == true && "$OFF_PIXELS_SET" == true ]]; then
+    die "-o cannot be combined with -s; change the pixel count without -s so brightness compensation can be recalculated"
+  fi
+  if [[ "$AREA_SET" == true && ! "$CLI_AREA" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]]; then
+    die "invalid area '$CLI_AREA'; expected x:y:w:h using non-negative integers"
+  fi
+  if [[ "$OFF_PIXELS_SET" == true && ! "$CLI_OFF_PIXELS" =~ ^[1-3]$ ]]; then
+    die "invalid pixel count '$CLI_OFF_PIXELS'; use 1, 2, or 3"
+  fi
+  if [[ "$MONITOR_SET" == true && ! "$CLI_MONITOR" =~ ^[0-9]+$ ]]; then
+    die "invalid monitor ID '$CLI_MONITOR'; expected a non-negative integer"
   fi
 fi
 
-if $_USE_EVAL; then
-  _set_shader() { hyprctl eval "hl.config({ decoration = { screen_shader = [[$1]] } })"; }
-  _clear_shader() { hyprctl eval 'hl.config({ decoration = { screen_shader = "" } })'; }
-else
-  _set_shader() { hyprctl keyword decoration:screen_shader "$1"; }
-  _clear_shader() { hyprctl keyword decoration:screen_shader ""; }
-fi
+need_command jq
+need_command flock
+need_command brightnessctl
+need_command hyprctl
+need_command mktemp
+need_command mv
+need_command rm
+need_command chmod
+need_command mkdir
+need_command cp
 
-show_help(){
-  cat <<EOF
-Usage: $(basename $0) [OPTION]... [off]
+[[ -d "$RUNTIME_DIR" ]] || die "XDG_RUNTIME_DIR does not exist: $RUNTIME_DIR"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+[[ -O "$STATE_DIR" ]] || die "runtime directory is not owned by the current user: $STATE_DIR"
+exec 9>"$LOCK_FILE"
+flock 9
 
-Hyprland shader utility to prevent OLED burn in.
+STATUS=""
+PHASE=0
+OFF_PIXELS=1
+MONITOR=0
+AREA=""
+INVERT=false
+BRIGHTNESS_DEVICE="${HYPROLED_BRIGHTNESS_DEVICE:-$DEFAULT_BRIGHTNESS_DEVICE}"
+BRIGHTNESS_ORIGINAL=0
+BRIGHTNESS_MAX=0
+BRIGHTNESS_APPLIED=0
+COMPENSATION_PERCENT=10
+PREVIOUS_SHADER=""
+ACTIVE_SHADER=""
+RESTORE_TARGET=""
+TEMP_STATE_FILE=""
 
-version: 0.2.0
+load_state() {
+  [[ -s "$STATE_FILE" ]] || die "state file is missing or empty: $STATE_FILE"
+  jq -e '
+    type == "object" and
+    .version == 1 and
+    (.status == "active" or .status == "applying" or .status == "restoring") and
+    (.phase | type == "number" and . >= 0 and . <= 3) and
+    (.offPixels | type == "number" and . >= 1 and . <= 3) and
+    (.monitor | type == "number" and . >= 0) and
+    (.brightnessOriginal | type == "number" and . >= 0) and
+    (.brightnessMax | type == "number" and . > 0) and
+    (.brightnessApplied | type == "number" and . >= 0) and
+    (.invert | type == "boolean") and
+    (if .status == "restoring" then (.restoreTarget | type == "number" and . >= 0) else true end) and
+    (.brightnessDevice | type == "string" and length > 0) and
+    (.activeShader | type == "string" and length > 0) and
+    (.previousShader | type == "string")
+  ' "$STATE_FILE" >/dev/null || die "state file is invalid or unsupported; refusing to change brightness or shader"
 
-Options:
-  -a x:y:w:h  The effective area. Useful for bars. [Default: The entire screen]
-  -i          Inverts the area. Useful for focus effect of a window or popup.
-  -o N        How many pixels of each 2x2 block are turned off (1-3). [Default: 1]
-  -s          Swap the off pixels to the next of 4 positions. Useful to prevent
-              burn in, when called periodically (e.g. every 15 minutes).
-  -m ID       Id of your oled monitor (hyprctl monitors). [Default: 0]
-  -h          Display this help message.
-
-Argument:
-  off         Disable hyproled
-EOF
+  STATUS=$(jq -r '.status' "$STATE_FILE")
+  PHASE=$(jq -r '.phase' "$STATE_FILE")
+  OFF_PIXELS=$(jq -r '.offPixels' "$STATE_FILE")
+  MONITOR=$(jq -r '.monitor' "$STATE_FILE")
+  AREA=$(jq -r '.area // ""' "$STATE_FILE")
+  INVERT=$(jq -r '.invert' "$STATE_FILE")
+  BRIGHTNESS_DEVICE=$(jq -r '.brightnessDevice' "$STATE_FILE")
+  BRIGHTNESS_ORIGINAL=$(jq -r '.brightnessOriginal' "$STATE_FILE")
+  BRIGHTNESS_MAX=$(jq -r '.brightnessMax' "$STATE_FILE")
+  BRIGHTNESS_APPLIED=$(jq -r '.brightnessApplied' "$STATE_FILE")
+  COMPENSATION_PERCENT=$(jq -r '.compensationPercent' "$STATE_FILE")
+  PREVIOUS_SHADER=$(jq -r '.previousShader' "$STATE_FILE")
+  ACTIVE_SHADER=$(jq -r '.activeShader' "$STATE_FILE")
+  RESTORE_TARGET=$(jq -r '.restoreTarget // ""' "$STATE_FILE")
 }
 
-if [[ $1 == off ]]; then
-  _clear_shader
-  exit 0
-fi
+save_state() {
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/state.XXXXXX")
+  TEMP_STATE_FILE="$tmp"
+  if ! jq -n \
+    --arg status "$STATUS" \
+    --arg area "$AREA" \
+    --arg brightnessDevice "$BRIGHTNESS_DEVICE" \
+    --arg previousShader "$PREVIOUS_SHADER" \
+    --arg activeShader "$ACTIVE_SHADER" \
+    --arg restoreTarget "$RESTORE_TARGET" \
+    --argjson phase "$PHASE" \
+    --argjson offPixels "$OFF_PIXELS" \
+    --argjson monitor "$MONITOR" \
+    --argjson invert "$INVERT" \
+    --argjson brightnessOriginal "$BRIGHTNESS_ORIGINAL" \
+    --argjson brightnessMax "$BRIGHTNESS_MAX" \
+    --argjson brightnessApplied "$BRIGHTNESS_APPLIED" \
+    --argjson compensationPercent "$COMPENSATION_PERCENT" \
+    '{
+      version: 1,
+      status: $status,
+      enabled: ($status != "restoring"),
+      phase: $phase,
+      offPixels: $offPixels,
+      monitor: $monitor,
+      area: (if $area == "" then null else $area end),
+      invert: $invert,
+      brightnessDevice: $brightnessDevice,
+      brightnessOriginal: $brightnessOriginal,
+      brightnessMax: $brightnessMax,
+      brightnessApplied: $brightnessApplied,
+      compensationPercent: $compensationPercent,
+      previousShader: $previousShader,
+      activeShader: $activeShader,
+      restoreTarget: (if $restoreTarget == "" then null else ($restoreTarget | tonumber) end)
+    }' > "$tmp"; then
+    rm -f -- "$tmp"
+    TEMP_STATE_FILE=""
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; TEMP_STATE_FILE=""; return 1; }
+  mv -f -- "$tmp" "$STATE_FILE" || return 1
+  TEMP_STATE_FILE=""
+}
 
-while getopts ":a:io:sm:h" opt; do
-  case $opt in
-    a) area=$OPTARG ;;
-    i) invert=true ;;
-    o) off_pixels=$OPTARG ;;
-    s) shift=true ;;
-    m) monitor=$OPTARG ;;
-    h) show_help; exit 0 ;;
-    *) show_help; exit 1 ;;
+get_brightness() {
+  local value
+  value=$(brightnessctl -d "$BRIGHTNESS_DEVICE" get 2>/dev/null) || return 1
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+get_brightness_max() {
+  local value
+  value=$(brightnessctl -d "$BRIGHTNESS_DEVICE" max 2>/dev/null) || return 1
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+set_brightness() {
+  local requested="$1"
+  brightnessctl -d "$BRIGHTNESS_DEVICE" set "$requested" >/dev/null || return 1
+  get_brightness
+}
+
+clamp_brightness() {
+  local value="$1" maximum="$2"
+  if (( value < 0 )); then value=0; fi
+  if (( value > maximum )); then value="$maximum"; fi
+  printf '%s\n' "$value"
+}
+
+compensation_for_pixels() {
+  case "$1" in
+    1) printf '10\n' ;;
+    2) printf '20\n' ;;
+    3) printf '30\n' ;;
+    *) return 1 ;;
   esac
-done
-shift $((OPTIND-1))
+}
 
-# 4 is not allowed: turning off all 4 pixels of a block would blank the display.
-if [[ ! $off_pixels =~ ^[1-3]$ ]]; then
-  echo "Invalid off pixel count, use a number between 1 and 3" >&2; exit 1
-fi
+setup_hyprland() {
+  local version_text major minor eval_probe sock sig
+  export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 
-# The 2x2 pixel block is walked through in 4 steps, one off position at a time.
-# Each -s call advances the rotation by one step and persists it.
-phase=0
-[[ -f $STATE_FILE ]] && read -r phase < "$STATE_FILE"
-[[ $phase =~ ^[0-3]$ ]] || phase=0
-if $shift; then
-  phase=$(( (phase + 1) % 4 ))
-  echo "$phase" > "$STATE_FILE"
-fi
+  if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    for sock in "$XDG_RUNTIME_DIR"/hypr/*/.socket.sock; do
+      [[ -S "$sock" ]] || continue
+      sig=${sock%/.socket.sock}
+      export HYPRLAND_INSTANCE_SIGNATURE="${sig##*/}"
+      break
+    done
+  fi
 
-shader_code="#version 300 es
+  version_text=$(hyprctl version 2>&1) || die "cannot connect to a running Hyprland instance: $version_text"
+  [[ "$version_text" == *Hyprland* ]] || die "cannot identify the running Hyprland version: $version_text"
+
+  USE_EVAL=false
+  if [[ "$version_text" =~ Hyprland[[:space:]]+([0-9]+)\.([0-9]+) ]]; then
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    if (( major > 0 || minor >= 55 )); then
+      eval_probe=$(hyprctl eval '' 2>&1 || true)
+      if [[ "$eval_probe" != *"only supported with the lua config manager"* ]]; then
+        USE_EVAL=true
+      fi
+    fi
+  fi
+}
+
+get_current_shader() {
+  local option json=""
+  # Hyprland's option separator changed across releases/config managers.
+  for option in decoration:screen_shader decoration.screen_shader; do
+    json=$(hyprctl -j getoption "$option" 2>&1) || continue
+    if jq -e 'type == "object" and (.str | type == "string")' <<< "$json" >/dev/null 2>&1; then
+      jq -r 'if .set == false then "" else .str end' <<< "$json"
+      return 0
+    fi
+  done
+  printf 'hyproled: could not read decoration:screen_shader from Hyprland (last response: %s)\n' "$json" >&2
+  return 1
+}
+
+set_shader() {
+  local path="$1" output="" actual=""
+  if [[ "$USE_EVAL" == true ]]; then
+    output=$(hyprctl eval "hl.config({ decoration = { screen_shader = [[$path]] } })" 2>&1) || {
+      printf 'hyproled: hyprctl eval failed: %s\n' "$output" >&2
+      return 1
+    }
+  else
+    output=$(hyprctl keyword decoration:screen_shader "$path" 2>&1) || {
+      printf 'hyproled: hyprctl keyword failed: %s\n' "$output" >&2
+      return 1
+    }
+  fi
+  actual=$(get_current_shader) || return 1
+  if [[ "$actual" != "$path" ]]; then
+    printf 'hyproled: Hyprland did not apply the requested shader (reported: %s)\n' "${actual:-<empty>}" >&2
+    [[ -z "$output" ]] || printf 'hyproled: hyprctl response: %s\n' "$output" >&2
+    return 1
+  fi
+}
+
+make_shader() {
+  local destination="$1"
+  local x=0 y=0 w=0 h=0
+  {
+    cat <<EOF_SHADER
+#version 300 es
 precision highp float;
 in vec2 v_texcoord;
 uniform sampler2D tex;
@@ -105,37 +314,236 @@ uniform int wl_output;
 layout(location = 0) out vec4 fragColor;
 void main(){
   vec4 orig = texture(tex, v_texcoord);
-  if(wl_output != ${monitor}) { fragColor = orig; return; }
+  if(wl_output != ${MONITOR}) { fragColor = orig; return; }
   vec2 fc = gl_FragCoord.xy;
   float pos = mod(fc.x, 2.0) + 2.0 * mod(fc.y, 2.0);
-  bool off = mod(pos - float(${phase}), 4.0) < float(${off_pixels});
-  vec4 pixel = off ? vec4(${fill_color}) : orig;
-"
-
-if [[ -n $area ]]; then
-  if [[ $area =~ ^([0-9]+):([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-    read x y w h <<< "${BASH_REMATCH[*]:1:4}"
-    shader_code+="  bool inRegion = (fc.x >= ${x}.0 && fc.x <= (${x}.0+${w}.0) && fc.y >= ${y}.0 && fc.y <= (${y}.0+${h}.0));
-"
-    if $invert; then
-      shader_code+="  fragColor = inRegion ? orig : pixel;
-"
+  bool off = mod(pos - float(${PHASE}), 4.0) < float(${OFF_PIXELS});
+  vec4 pixel = off ? vec4(0.0, 0.0, 0.0, 1.0) : orig;
+EOF_SHADER
+    if [[ -n "$AREA" ]]; then
+      IFS=: read -r x y w h <<< "$AREA"
+      printf '  bool inRegion = (fc.x >= %s.0 && fc.x <= (%s.0+%s.0) && fc.y >= %s.0 && fc.y <= (%s.0+%s.0));\n' "$x" "$x" "$w" "$y" "$y" "$h"
+      if [[ "$INVERT" == true ]]; then
+        printf '  fragColor = inRegion ? orig : pixel;\n'
+      else
+        printf '  fragColor = inRegion ? pixel : orig;\n'
+      fi
     else
-      shader_code+="  fragColor = inRegion ? pixel : orig;
-"
+      printf '  fragColor = pixel;\n'
     fi
-    shader_code+="}
-"
-  else
-    echo "Invalid area format, use x:y:w:h" >&2; exit 1
-  fi
-else
-  shader_code+="  fragColor = pixel;
+    printf '}\n'
+  } > "$destination"
 }
-"
+
+is_our_shader_path() {
+  case "$1" in
+    "$STATE_DIR"/shader.*.glsl) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ROLLBACK_ENABLED=false
+OP_COMMITTED=false
+ROLLBACK_SHADER=""
+ROLLBACK_BRIGHTNESS=0
+BRIGHTNESS_WRITE_ATTEMPTED=false
+STATE_BACKUP=""
+NEW_SHADER=""
+KEEP_NEW_SHADER=false
+
+on_exit() {
+  local exit_code=$?
+  trap - EXIT
+  if [[ "$ROLLBACK_ENABLED" == true && "$OP_COMMITTED" != true ]]; then
+    local rollback_ok=true
+    if ! set_shader "$ROLLBACK_SHADER"; then
+      warn "could not roll back the screen shader; keeping recovery state"
+      rollback_ok=false
+    fi
+    if [[ "$BRIGHTNESS_WRITE_ATTEMPTED" == true ]] && ! set_brightness "$ROLLBACK_BRIGHTNESS" >/dev/null; then
+      warn "could not roll back brightness; keeping recovery state"
+      rollback_ok=false
+    fi
+    if [[ "$rollback_ok" == true ]]; then
+      if [[ -n "$STATE_BACKUP" && -f "$STATE_BACKUP" ]]; then
+        mv -f -- "$STATE_BACKUP" "$STATE_FILE"
+        STATE_BACKUP=""
+      else
+        rm -f -- "$STATE_FILE"
+      fi
+    else
+      KEEP_NEW_SHADER=true
+      warn "recovery data is retained in $STATE_FILE; run 'hyproled off' after fixing the error"
+    fi
+  fi
+  if [[ -n "$TEMP_STATE_FILE" && -f "$TEMP_STATE_FILE" ]]; then
+    rm -f -- "$TEMP_STATE_FILE"
+  fi
+  if [[ "$OP_COMMITTED" != true && "$KEEP_NEW_SHADER" != true && -n "$NEW_SHADER" && -f "$NEW_SHADER" ]]; then
+    rm -f -- "$NEW_SHADER"
+  fi
+  if [[ -n "$STATE_BACKUP" && -f "$STATE_BACKUP" ]]; then
+    rm -f -- "$STATE_BACKUP"
+  fi
+  exit "$exit_code"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ "$ACTION" == "off" ]]; then
+  if [[ ! -f "$STATE_FILE" ]]; then
+    setup_hyprland
+    current_shader=$(get_current_shader) || die "cannot inspect the active screen shader"
+    if [[ "$current_shader" == "/dev/shm/hyproled_shader.glsl" ]]; then
+      set_shader "" || die "could not disable the legacy hyproled shader"
+      printf 'hyproled: legacy shader disabled; no brightness state was present to restore\n'
+      exit 0
+    fi
+    [[ -z "$current_shader" ]] || die "no hyproled state exists; refusing to clear another shader: $current_shader"
+    printf 'hyproled: already off\n'
+    exit 0
+  fi
+
+  load_state
+  if [[ "$STATUS" != "restoring" ]]; then
+    setup_hyprland
+    current_shader=$(get_current_shader) || die "cannot inspect the active screen shader; brightness was not changed"
+    if [[ "$current_shader" == "$ACTIVE_SHADER" ]]; then
+      set_shader "$PREVIOUS_SHADER" || die "could not restore the previous screen shader; brightness was not changed"
+    elif [[ "$current_shader" == "$PREVIOUS_SHADER" ]]; then
+      : # Already restored by an interrupted earlier invocation.
+    else
+      warn "screen shader was changed externally; leaving it untouched: ${current_shader:-<empty>}"
+    fi
+
+    current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'; state is retained"
+    if [[ "$STATUS" == "applying" && "$current_brightness" == "$BRIGHTNESS_ORIGINAL" ]]; then
+      user_delta=0
+    else
+      user_delta=$(( current_brightness - BRIGHTNESS_APPLIED ))
+    fi
+    current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'; state is retained"
+    RESTORE_TARGET=$(clamp_brightness "$(( BRIGHTNESS_ORIGINAL + user_delta ))" "$current_max")
+    STATUS="restoring"
+    save_state || die "could not persist the restore target; brightness was not changed"
+  fi
+
+  restored=$(set_brightness "$RESTORE_TARGET") || die "could not restore brightness; state is retained for retry"
+  rm -f -- "$STATE_FILE" || die "brightness restored to $restored, but could not remove state file $STATE_FILE"
+  if is_our_shader_path "$ACTIVE_SHADER"; then rm -f -- "$ACTIVE_SHADER"; fi
+  printf 'hyproled: disabled; brightness restored to %s on %s\n' "$restored" "$BRIGHTNESS_DEVICE"
+  exit 0
 fi
 
-echo "$shader_code" > "$SHADER_FILE"
+if [[ "$SHIFT" == true ]]; then
+  [[ -f "$STATE_FILE" ]] || die "cannot use -s before enabling hyproled"
+  load_state
+  [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
+  [[ "$OFF_PIXELS_SET" == false ]] || die "-o cannot be combined with -s"
+  [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
+  [[ "$INVERT_SET" == false ]] || INVERT=true
+  [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
+  PHASE=$(( (PHASE + 1) % 4 ))
+else
+  if [[ -f "$STATE_FILE" ]]; then
+    load_state
+    [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
+    [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
+    [[ "$INVERT_SET" == false ]] || INVERT=true
+    [[ "$OFF_PIXELS_SET" == false ]] || OFF_PIXELS="$CLI_OFF_PIXELS"
+    [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
+  else
+    PHASE=0
+    OFF_PIXELS="$CLI_OFF_PIXELS"
+    MONITOR="$CLI_MONITOR"
+    AREA="$CLI_AREA"
+    INVERT="$CLI_INVERT"
+  fi
+fi
 
+[[ "$OFF_PIXELS" =~ ^[1-3]$ ]] || die "invalid pixel count in state"
+[[ "$MONITOR" =~ ^[0-9]+$ ]] || die "invalid monitor ID in state"
+[[ -z "$AREA" || "$AREA" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] || die "invalid area in state"
 
-_set_shader "$SHADER_FILE"
+setup_hyprland
+current_shader=$(get_current_shader) || die "cannot inspect decoration:screen_shader"
+if [[ ! -f "$STATE_FILE" && "$current_shader" == "/dev/shm/hyproled_shader.glsl" ]]; then
+  die "the legacy hyproled shader is still active; run 'hyproled off' once, then enable this version again"
+fi
+
+if [[ -f "$STATE_FILE" ]]; then
+  if [[ "$current_shader" != "$ACTIVE_SHADER" && "$current_shader" != "$PREVIOUS_SHADER" ]]; then
+    die "another screen shader was installed while hyproled was active; refusing to overwrite it: $current_shader"
+  fi
+  if [[ "$SHIFT" != true ]]; then
+    current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+    current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
+    (( current_max > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
+    user_delta=$(( current_brightness - BRIGHTNESS_APPLIED ))
+    BRIGHTNESS_MAX="$current_max"
+    # Fold the accumulated user adjustment into the un-compensated baseline.
+    # This prevents a later `off` from losing adjustments after reconfiguration.
+    BRIGHTNESS_ORIGINAL=$(clamp_brightness "$(( BRIGHTNESS_ORIGINAL + user_delta ))" "$BRIGHTNESS_MAX")
+  fi
+else
+  PREVIOUS_SHADER="$current_shader"
+  current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+  BRIGHTNESS_ORIGINAL="$current_brightness"
+  BRIGHTNESS_MAX=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
+  (( BRIGHTNESS_MAX > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
+  user_delta=0
+fi
+
+COMPENSATION_PERCENT=$(compensation_for_pixels "$OFF_PIXELS") || die "invalid pixel count"
+if [[ "$SHIFT" == true ]]; then
+  # -s only rotates the shader. Brightness is deliberately not touched.
+  current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+  ROLLBACK_BRIGHTNESS="$current_brightness"
+  ROLLBACK_SHADER="$current_shader"
+else
+  adjusted_base="$BRIGHTNESS_ORIGINAL"
+  offset=$(( (BRIGHTNESS_MAX * COMPENSATION_PERCENT + 50) / 100 ))
+  requested_brightness=$(clamp_brightness "$(( adjusted_base + offset ))" "$BRIGHTNESS_MAX")
+  ROLLBACK_BRIGHTNESS="$current_brightness"
+  ROLLBACK_SHADER="$current_shader"
+fi
+
+NEW_SHADER=$(mktemp "$STATE_DIR/shader.XXXXXX.glsl")
+make_shader "$NEW_SHADER"
+if [[ -f "$STATE_FILE" ]]; then
+  STATE_BACKUP=$(mktemp "$STATE_DIR/state-backup.XXXXXX")
+  cp -- "$STATE_FILE" "$STATE_BACKUP"
+fi
+
+OLD_ACTIVE_SHADER="$ACTIVE_SHADER"
+ACTIVE_SHADER="$NEW_SHADER"
+STATUS="applying"
+RESTORE_TARGET=""
+if [[ "$SHIFT" != true ]]; then BRIGHTNESS_APPLIED="$requested_brightness"; fi
+
+ROLLBACK_ENABLED=true
+save_state || die "could not write state file"
+set_shader "$ACTIVE_SHADER" || die "could not apply the screen shader"
+if [[ "$SHIFT" != true ]]; then
+  BRIGHTNESS_WRITE_ATTEMPTED=true
+  actual_brightness=$(set_brightness "$requested_brightness") || die "could not apply brightness compensation"
+  BRIGHTNESS_APPLIED="$actual_brightness"
+fi
+
+STATUS="active"
+save_state || die "could not finalize state file"
+OP_COMMITTED=true
+ROLLBACK_ENABLED=false
+
+if [[ -n "$STATE_BACKUP" ]]; then rm -f -- "$STATE_BACKUP"; STATE_BACKUP=""; fi
+if [[ -n "$OLD_ACTIVE_SHADER" && "$OLD_ACTIVE_SHADER" != "$ACTIVE_SHADER" ]] && is_our_shader_path "$OLD_ACTIVE_SHADER"; then
+  rm -f -- "$OLD_ACTIVE_SHADER"
+fi
+
+if [[ "$SHIFT" == true ]]; then
+  printf 'hyproled: shifted to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
+else
+  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; brightness %s -> %s (%s%% compensation)\n' \
+    "$OFF_PIXELS" "$ROLLBACK_BRIGHTNESS" "$BRIGHTNESS_APPLIED" "$COMPENSATION_PERCENT"
+fi
