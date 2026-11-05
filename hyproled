@@ -102,6 +102,15 @@ emit_status() {
   jq -c '
     . as $s
     | ($s.brightnessEnabled // true) as $brightness_enabled
+    | (
+        [range(0; 4) as $pos
+         | if (($pos - $s.phase + 4) % 4) < $s.offPixels
+           then "1"
+           else "0"
+           end]
+        | reverse
+        | join("")
+      ) as $mask
     | {
         text: "◯",
         alt: (if $s.status == "active" then "active" else "error" end),
@@ -134,6 +143,7 @@ emit_status() {
           if $s.status == "active" then
             [
               "active",
+              ("mask-" + $mask),
               ("pixels-" + ($s.offPixels | tostring)),
               ("phase-" + ($s.phase | tostring)),
               (if $brightness_enabled
