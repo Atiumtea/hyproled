@@ -34,6 +34,7 @@ Options:
   -o N        Number of disabled pixels in each 2x2 block (1-3).
   -s          Rotate the active 2x2 pattern by one phase.
   -m ID       Hyprland monitor ID (default: 0).
+  --status    Print current status as Waybar-compatible JSON and exit.
   -h          Show this help.
 
 Argument:
@@ -49,8 +50,149 @@ die() { printf 'hyproled: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'hyproled: warning: %s\n' "$*" >&2; }
 need_command() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
+emit_status() {
+  local invalid_tooltip="Hyproled: invalid or unsupported state file"
+
+  # No state file means the utility is currently disabled.
+  if [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
+    jq -cn '{
+      text: "◯",
+      alt: "disabled",
+      tooltip: "Hyproled: disabled",
+      class: ["disabled"]
+    }'
+    return 0
+  fi
+
+  # Do not expose malformed or partially written state to Waybar.
+  if [[ ! -f "$STATE_FILE" || ! -r "$STATE_FILE" ]] || ! jq -e '
+    type == "object" and
+    (.version == 1 or .version == 2) and
+    (.status == "active" or .status == "applying" or .status == "restoring") and
+    (.phase | type == "number" and floor == . and . >= 0 and . <= 3) and
+    (.offPixels | type == "number" and floor == . and . >= 1 and . <= 3) and
+    (.monitor | type == "number" and floor == . and . >= 0) and
+    (.area == null or (.area | type == "string")) and
+    (.invert | type == "boolean") and
+    (.brightnessOriginal | type == "number" and . >= 0) and
+    (.brightnessMax | type == "number" and . > 0) and
+    (.brightnessApplied | type == "number" and . >= 0) and
+    (.brightnessDevice | type == "string" and length > 0) and
+    (.activeShader | type == "string" and length > 0) and
+    (.previousShader | type == "string") and
+    (.compensationPercent == null or
+      (.compensationPercent | type == "number" and . >= 0)) and
+    (if .status == "restoring" then
+      (.restoreTarget | type == "number" and . >= 0)
+    else true end) and
+    (if .version == 1 then true else
+      (.brightnessEnabled | type == "boolean") and
+      (.compensationPercentOfMaxByPixelCount | type == "object")
+    end)
+  ' "$STATE_FILE" >/dev/null 2>&1; then
+    jq -cn --arg tooltip "$invalid_tooltip" '{
+      text: "◌",
+      alt: "error",
+      tooltip: $tooltip,
+      class: ["error"]
+    }'
+    return 0
+  fi
+
+  jq -c '
+    . as $s
+    | ($s.brightnessEnabled // true) as $brightness_enabled
+    | {
+        text: "◯",
+        alt: (if $s.status == "active" then "active" else "error" end),
+        tooltip: (
+          "Hyproled: " +
+          (if $s.status == "active"
+           then "active"
+           else "recovery required (" + $s.status + ")"
+           end) +
+          "\nDisabled pixels: " + ($s.offPixels | tostring) + "/4" +
+          "\nPattern phase: " + ($s.phase | tostring) + "/3" +
+          "\nMonitor: " + ($s.monitor | tostring) +
+          "\nArea: " + ($s.area // "full screen") +
+          "\nInvert: " + (if $s.invert then "yes" else "no" end) +
+          "\nBrightness compensation: " +
+            (if $brightness_enabled then "enabled" else "disabled" end) +
+          (if $brightness_enabled then
+            "\nDevice: " + $s.brightnessDevice +
+            "\nCompensation: +" +
+              (($s.compensationPercent // 0) | tostring) + "% of maximum" +
+            "\nBaseline: " + ($s.brightnessOriginal | tostring) +
+              "/" + ($s.brightnessMax | tostring) +
+            "\nApplied: " + ($s.brightnessApplied | tostring) +
+              "/" + ($s.brightnessMax | tostring)
+          else
+            "\nBrightness: unchanged"
+          end)
+        ),
+        class: (
+          if $s.status == "active" then
+            [
+              "active",
+              ("pixels-" + ($s.offPixels | tostring)),
+              ("phase-" + ($s.phase | tostring)),
+              (if $brightness_enabled
+               then "brightness-enabled"
+               else "brightness-disabled"
+               end)
+            ]
+          else
+            ["error"]
+          end
+        )
+      }
+  ' "$STATE_FILE"
+}
+
+
+notify_waybar() {
+  local signal_number signal_mask status_file pid process_name
+  local key value caught
+
+  # Resolve SIGRTMIN+10 instead of assuming a hard-coded signal number.
+  signal_number=$(kill -l RTMIN+10 2>/dev/null) || return 0
+  [[ "$signal_number" =~ ^[0-9]+$ ]] || return 0
+
+  signal_mask=$((1 << (signal_number - 1)))
+
+  # Only signal Waybar instances that have actually registered this signal.
+  # This prevents sending the default-action signal to an unconfigured Waybar.
+  for status_file in /proc/[0-9]*/status; do
+    [[ -r "$status_file" ]] || continue
+
+    pid=${status_file#/proc/}
+    pid=${pid%/status}
+
+    IFS= read -r process_name < "/proc/$pid/comm" || continue
+    [[ "$process_name" == "waybar" ]] || continue
+
+    caught=""
+    while read -r key value _; do
+      if [[ "$key" == "SigCgt:" ]]; then
+        caught="$value"
+        break
+      fi
+    done < "$status_file"
+
+    [[ "$caught" =~ ^[[:xdigit:]]+$ ]] || continue
+
+    if (( (16#$caught & signal_mask) != 0 )); then
+      kill -"$signal_number" "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+
 ACTION="enable"
-if [[ ${1:-} == "off" ]]; then
+if [[ ${1:-} == "--status" ]]; then
+  [[ $# -eq 1 ]] || die "'--status' does not accept additional arguments"
+  ACTION="status"
+elif [[ ${1:-} == "off" ]]; then
   [[ $# -eq 1 ]] || die "'off' does not accept additional arguments"
   ACTION="off"
 else
@@ -84,6 +226,12 @@ if [[ "$ACTION" == "enable" ]]; then
   if [[ "$MONITOR_SET" == true && ! "$CLI_MONITOR" =~ ^[0-9]+$ ]]; then
     die "invalid monitor ID '$CLI_MONITOR'; expected a non-negative integer"
   fi
+fi
+
+if [[ "$ACTION" == "status" ]]; then
+  need_command jq
+  emit_status
+  exit 0
 fi
 
 need_command jq
@@ -440,6 +588,7 @@ if [[ "$ACTION" == "off" ]]; then
     current_shader=$(get_current_shader) || die "cannot inspect the active screen shader"
     if [[ "$current_shader" == "/dev/shm/hyproled_shader.glsl" ]]; then
       set_shader "" || die "could not disable the legacy hyproled shader"
+      notify_waybar
       printf 'hyproled: legacy shader disabled; no brightness state was present to restore\n'
       exit 0
     fi
@@ -481,6 +630,7 @@ if [[ "$ACTION" == "off" ]]; then
   fi
   rm -f -- "$STATE_FILE" || die "could not remove state file $STATE_FILE"
   if is_our_shader_path "$ACTIVE_SHADER"; then rm -f -- "$ACTIVE_SHADER"; fi
+  notify_waybar
   if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
     printf 'hyproled: disabled; brightness restored to %s on %s\n' "$restored" "$BRIGHTNESS_DEVICE"
   else
@@ -603,6 +753,8 @@ if [[ -n "$STATE_BACKUP" ]]; then rm -f -- "$STATE_BACKUP"; STATE_BACKUP=""; fi
 if [[ -n "$OLD_ACTIVE_SHADER" && "$OLD_ACTIVE_SHADER" != "$ACTIVE_SHADER" ]] && is_our_shader_path "$OLD_ACTIVE_SHADER"; then
   rm -f -- "$OLD_ACTIVE_SHADER"
 fi
+
+notify_waybar
 
 if [[ "$SHIFT" == true ]]; then
   printf 'hyproled: shifted to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
