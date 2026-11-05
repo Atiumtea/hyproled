@@ -4,11 +4,11 @@ IFS=$'\n\t'
 umask 077
 
 VERSION="0.3.0-dev"
-DEFAULT_BRIGHTNESS_DEVICE="intel_backlight"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATE_DIR="$RUNTIME_DIR/hyproled"
 STATE_FILE="$STATE_DIR/state.json"
 LOCK_FILE="$STATE_DIR/lock"
+CONFIG_FILE="${HYPROLED_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hyproled/config.json}"
 
 SHIFT=false
 AREA_SET=false
@@ -17,8 +17,8 @@ OFF_PIXELS_SET=false
 MONITOR_SET=false
 CLI_AREA=""
 CLI_INVERT=false
-CLI_OFF_PIXELS=1
-CLI_MONITOR=0
+CLI_OFF_PIXELS=""
+CLI_MONITOR=""
 
 show_help() {
   cat <<EOF_HELP
@@ -41,7 +41,7 @@ Argument:
               adjusted by any net brightness change made while active.
 
 Environment:
-  HYPROLED_BRIGHTNESS_DEVICE  brightnessctl device (default: intel_backlight)
+  HYPROLED_CONFIG  Path to the JSON configuration file.
 EOF_HELP
 }
 
@@ -110,21 +110,28 @@ OFF_PIXELS=1
 MONITOR=0
 AREA=""
 INVERT=false
-BRIGHTNESS_DEVICE="${HYPROLED_BRIGHTNESS_DEVICE:-$DEFAULT_BRIGHTNESS_DEVICE}"
+BRIGHTNESS_DEVICE=""
+BRIGHTNESS_ENABLED=""
 BRIGHTNESS_ORIGINAL=0
 BRIGHTNESS_MAX=0
 BRIGHTNESS_APPLIED=0
-COMPENSATION_PERCENT=10
+COMPENSATION_PERCENT=0
+COMPENSATION_MAP=""
+CONFIG_DEFAULT_OFF_PIXELS=""
+CONFIG_DEFAULT_MONITOR=""
+CONFIG_DEFAULT_AREA=""
+CONFIG_DEFAULT_INVERT=""
 PREVIOUS_SHADER=""
 ACTIVE_SHADER=""
 RESTORE_TARGET=""
 TEMP_STATE_FILE=""
 
 load_state() {
+  local state_map
   [[ -s "$STATE_FILE" ]] || die "state file is missing or empty: $STATE_FILE"
   jq -e '
     type == "object" and
-    .version == 1 and
+    (.version == 1 or .version == 2) and
     (.status == "active" or .status == "applying" or .status == "restoring") and
     (.phase | type == "number" and . >= 0 and . <= 3) and
     (.offPixels | type == "number" and . >= 1 and . <= 3) and
@@ -136,7 +143,11 @@ load_state() {
     (if .status == "restoring" then (.restoreTarget | type == "number" and . >= 0) else true end) and
     (.brightnessDevice | type == "string" and length > 0) and
     (.activeShader | type == "string" and length > 0) and
-    (.previousShader | type == "string")
+    (.previousShader | type == "string") and
+    (if .version == 1 then true else
+      (.brightnessEnabled | type == "boolean") and
+      (.compensationPercentOfMaxByPixelCount | type == "object")
+    end)
   ' "$STATE_FILE" >/dev/null || die "state file is invalid or unsupported; refusing to change brightness or shader"
 
   STATUS=$(jq -r '.status' "$STATE_FILE")
@@ -150,6 +161,10 @@ load_state() {
   BRIGHTNESS_MAX=$(jq -r '.brightnessMax' "$STATE_FILE")
   BRIGHTNESS_APPLIED=$(jq -r '.brightnessApplied' "$STATE_FILE")
   COMPENSATION_PERCENT=$(jq -r '.compensationPercent' "$STATE_FILE")
+  BRIGHTNESS_ENABLED=$(jq -r '.brightnessEnabled // true' "$STATE_FILE")
+  state_map=$(jq -c '.compensationPercentOfMaxByPixelCount // empty' "$STATE_FILE")
+  if [[ -n "$state_map" ]]; then COMPENSATION_MAP="$state_map"; fi
+  [[ -n "$COMPENSATION_MAP" ]] || COMPENSATION_MAP='{}'
   PREVIOUS_SHADER=$(jq -r '.previousShader' "$STATE_FILE")
   ACTIVE_SHADER=$(jq -r '.activeShader' "$STATE_FILE")
   RESTORE_TARGET=$(jq -r '.restoreTarget // ""' "$STATE_FILE")
@@ -174,8 +189,10 @@ save_state() {
     --argjson brightnessMax "$BRIGHTNESS_MAX" \
     --argjson brightnessApplied "$BRIGHTNESS_APPLIED" \
     --argjson compensationPercent "$COMPENSATION_PERCENT" \
+    --argjson brightnessEnabled "$BRIGHTNESS_ENABLED" \
+    --argjson compensationMap "$COMPENSATION_MAP" \
     '{
-      version: 1,
+      version: 2,
       status: $status,
       enabled: ($status != "restoring"),
       phase: $phase,
@@ -188,6 +205,8 @@ save_state() {
       brightnessMax: $brightnessMax,
       brightnessApplied: $brightnessApplied,
       compensationPercent: $compensationPercent,
+      brightnessEnabled: $brightnessEnabled,
+      compensationPercentOfMaxByPixelCount: $compensationMap,
       previousShader: $previousShader,
       activeShader: $activeShader,
       restoreTarget: (if $restoreTarget == "" then null else ($restoreTarget | tonumber) end)
@@ -229,12 +248,36 @@ clamp_brightness() {
 }
 
 compensation_for_pixels() {
-  case "$1" in
-    1) printf '10\n' ;;
-    2) printf '20\n' ;;
-    3) printf '30\n' ;;
-    *) return 1 ;;
-  esac
+  jq -er --arg key "$1" '.[$key] | select(type == "number")' <<< "$COMPENSATION_MAP"
+}
+
+load_config() {
+  [[ -r "$CONFIG_FILE" ]] || die "configuration file not found or unreadable: $CONFIG_FILE"
+
+  jq -e '
+    type == "object" and
+    .version == 1 and
+    (.defaults | type == "object") and
+    (.defaults.disabledPixels | type == "number" and floor == . and . >= 1 and . <= 3) and
+    (.defaults.monitor | type == "number" and floor == . and . >= 0) and
+    (.defaults.area == null or (.defaults.area | type == "string" and test("^[0-9]+:[0-9]+:[0-9]+:[0-9]+$"))) and
+    (.defaults.invert | type == "boolean") and
+    (.brightness | type == "object") and
+    (.brightness.enabled | type == "boolean") and
+    (.brightness.device | type == "string" and length > 0) and
+    (.brightness.compensationPercentOfMaxByPixelCount | type == "object") and
+    (.brightness.compensationPercentOfMaxByPixelCount["1"] | type == "number" and floor == . and . >= 0 and . <= 1000) and
+    (.brightness.compensationPercentOfMaxByPixelCount["2"] | type == "number" and floor == . and . >= 0 and . <= 1000) and
+    (.brightness.compensationPercentOfMaxByPixelCount["3"] | type == "number" and floor == . and . >= 0 and . <= 1000)
+  ' "$CONFIG_FILE" >/dev/null || die "invalid configuration in $CONFIG_FILE"
+
+  CONFIG_DEFAULT_OFF_PIXELS=$(jq -r '.defaults.disabledPixels' "$CONFIG_FILE")
+  CONFIG_DEFAULT_MONITOR=$(jq -r '.defaults.monitor' "$CONFIG_FILE")
+  CONFIG_DEFAULT_AREA=$(jq -r '.defaults.area // ""' "$CONFIG_FILE")
+  CONFIG_DEFAULT_INVERT=$(jq -r '.defaults.invert' "$CONFIG_FILE")
+  BRIGHTNESS_ENABLED=$(jq -r '.brightness.enabled' "$CONFIG_FILE")
+  BRIGHTNESS_DEVICE=$(jq -r '.brightness.device' "$CONFIG_FILE")
+  COMPENSATION_MAP=$(jq -c '.brightness.compensationPercentOfMaxByPixelCount' "$CONFIG_FILE")
 }
 
 setup_hyprland() {
@@ -417,24 +460,36 @@ if [[ "$ACTION" == "off" ]]; then
       warn "screen shader was changed externally; leaving it untouched: ${current_shader:-<empty>}"
     fi
 
-    current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'; state is retained"
-    if [[ "$STATUS" == "applying" && "$current_brightness" == "$BRIGHTNESS_ORIGINAL" ]]; then
-      user_delta=0
+    if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
+      current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'; state is retained"
+      if [[ "$STATUS" == "applying" && "$current_brightness" == "$BRIGHTNESS_ORIGINAL" ]]; then
+        user_delta=0
+      else
+        user_delta=$(( current_brightness - BRIGHTNESS_APPLIED ))
+      fi
+      current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'; state is retained"
+      RESTORE_TARGET=$(clamp_brightness "$(( BRIGHTNESS_ORIGINAL + user_delta ))" "$current_max")
     else
-      user_delta=$(( current_brightness - BRIGHTNESS_APPLIED ))
+      RESTORE_TARGET="$BRIGHTNESS_ORIGINAL"
     fi
-    current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'; state is retained"
-    RESTORE_TARGET=$(clamp_brightness "$(( BRIGHTNESS_ORIGINAL + user_delta ))" "$current_max")
     STATUS="restoring"
     save_state || die "could not persist the restore target; brightness was not changed"
   fi
 
-  restored=$(set_brightness "$RESTORE_TARGET") || die "could not restore brightness; state is retained for retry"
-  rm -f -- "$STATE_FILE" || die "brightness restored to $restored, but could not remove state file $STATE_FILE"
+  if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
+    restored=$(set_brightness "$RESTORE_TARGET") || die "could not restore brightness; state is retained for retry"
+  fi
+  rm -f -- "$STATE_FILE" || die "could not remove state file $STATE_FILE"
   if is_our_shader_path "$ACTIVE_SHADER"; then rm -f -- "$ACTIVE_SHADER"; fi
-  printf 'hyproled: disabled; brightness restored to %s on %s\n' "$restored" "$BRIGHTNESS_DEVICE"
+  if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
+    printf 'hyproled: disabled; brightness restored to %s on %s\n' "$restored" "$BRIGHTNESS_DEVICE"
+  else
+    printf 'hyproled: disabled; brightness compensation was disabled, brightness left unchanged\n'
+  fi
   exit 0
 fi
+
+load_config
 
 if [[ "$SHIFT" == true ]]; then
   [[ -f "$STATE_FILE" ]] || die "cannot use -s before enabling hyproled"
@@ -455,10 +510,14 @@ else
     [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
   else
     PHASE=0
-    OFF_PIXELS="$CLI_OFF_PIXELS"
-    MONITOR="$CLI_MONITOR"
-    AREA="$CLI_AREA"
-    INVERT="$CLI_INVERT"
+    OFF_PIXELS="$CONFIG_DEFAULT_OFF_PIXELS"
+    MONITOR="$CONFIG_DEFAULT_MONITOR"
+    AREA="$CONFIG_DEFAULT_AREA"
+    INVERT="$CONFIG_DEFAULT_INVERT"
+    [[ "$OFF_PIXELS_SET" == false ]] || OFF_PIXELS="$CLI_OFF_PIXELS"
+    [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
+    [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
+    [[ "$INVERT_SET" == false ]] || INVERT="$CLI_INVERT"
   fi
 fi
 
@@ -502,9 +561,13 @@ if [[ "$SHIFT" == true ]]; then
   ROLLBACK_BRIGHTNESS="$current_brightness"
   ROLLBACK_SHADER="$current_shader"
 else
-  adjusted_base="$BRIGHTNESS_ORIGINAL"
-  offset=$(( (BRIGHTNESS_MAX * COMPENSATION_PERCENT + 50) / 100 ))
-  requested_brightness=$(clamp_brightness "$(( adjusted_base + offset ))" "$BRIGHTNESS_MAX")
+  if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
+    adjusted_base="$BRIGHTNESS_ORIGINAL"
+    offset=$(( (BRIGHTNESS_MAX * COMPENSATION_PERCENT + 50) / 100 ))
+    requested_brightness=$(clamp_brightness "$(( adjusted_base + offset ))" "$BRIGHTNESS_MAX")
+  else
+    requested_brightness="$current_brightness"
+  fi
   ROLLBACK_BRIGHTNESS="$current_brightness"
   ROLLBACK_SHADER="$current_shader"
 fi
@@ -525,7 +588,7 @@ if [[ "$SHIFT" != true ]]; then BRIGHTNESS_APPLIED="$requested_brightness"; fi
 ROLLBACK_ENABLED=true
 save_state || die "could not write state file"
 set_shader "$ACTIVE_SHADER" || die "could not apply the screen shader"
-if [[ "$SHIFT" != true ]]; then
+if [[ "$SHIFT" != true && "$BRIGHTNESS_ENABLED" == true ]]; then
   BRIGHTNESS_WRITE_ATTEMPTED=true
   actual_brightness=$(set_brightness "$requested_brightness") || die "could not apply brightness compensation"
   BRIGHTNESS_APPLIED="$actual_brightness"
@@ -543,7 +606,9 @@ fi
 
 if [[ "$SHIFT" == true ]]; then
   printf 'hyproled: shifted to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
-else
+elif [[ "$BRIGHTNESS_ENABLED" == true ]]; then
   printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; brightness %s -> %s (%s%% compensation)\n' \
     "$OFF_PIXELS" "$ROLLBACK_BRIGHTNESS" "$BRIGHTNESS_APPLIED" "$COMPENSATION_PERCENT"
+else
+  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; brightness compensation disabled\n' "$OFF_PIXELS"
 fi
