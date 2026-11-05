@@ -78,6 +78,7 @@ def active_masks() -> list[str]:
 
 def svg_document(mask: str | None = None, *, error: bool = False) -> str:
     nodes: list[str] = []
+    palette_class = "error" if error else ("warning" if mask is None else "success")
 
     if error:
         nodes.extend((OUTER_RING, ERROR_MARK))
@@ -97,7 +98,7 @@ def svg_document(mask: str | None = None, *, error: bool = False) -> str:
             GRID_HORIZONTAL,
         ))
 
-    body = "\n  ".join(nodes)
+    body = "\n  ".join(nodes).replace('class="foreground"', f'class="{palette_class}"')
 
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" '

@@ -121,7 +121,7 @@ class IconGenerationTests(unittest.TestCase):
                 for element in paths.values():
                     self.assertEqual(
                         element.attrib.get("class"),
-                        "foreground",
+                        "success",
                     )
 
                 for pos, expected_prefix in EXPECTED_SECTOR_PREFIX.items():
@@ -141,18 +141,17 @@ class IconGenerationTests(unittest.TestCase):
                         )
 
     def test_off_and_error_icons(self):
+        off_root = read_svg("hyproled-off.svg")
+        error_root = read_svg("hyproled-error.svg")
+
         off = {
             element.attrib.get("id")
-            for element in read_svg("hyproled-off.svg").iter(
-                f"{SVG_NS}path"
-            )
+            for element in off_root.iter(f"{SVG_NS}path")
         }
 
         error = {
             element.attrib.get("id")
-            for element in read_svg("hyproled-error.svg").iter(
-                f"{SVG_NS}path"
-            )
+            for element in error_root.iter(f"{SVG_NS}path")
         }
 
         self.assertEqual(
@@ -163,6 +162,18 @@ class IconGenerationTests(unittest.TestCase):
         self.assertEqual(
             error,
             {"outer-ring", "error-mark"},
+        )
+
+        self.assertEqual(
+            {element.attrib.get("class")
+             for element in off_root.iter(f"{SVG_NS}path")},
+            {"warning"},
+        )
+
+        self.assertEqual(
+            {element.attrib.get("class")
+             for element in error_root.iter(f"{SVG_NS}path")},
+            {"error"},
         )
 
     def test_generator_check_mode(self):
