@@ -56,7 +56,10 @@ class CompositeShaderTests(unittest.TestCase):
 
         self.assertIn("orig = texture(tex, v_texcoord);", shader)
         self.assertIn("bool off =", shader)
-        self.assertNotIn("texelFetch", shader)
+        # Both GLSL branches are present; the false condition disables Pixel Shift.
+        self.assertIn("if (false) {", shader)
+        self.assertIn("texelFetch(tex, sourceTexel, 0)", shader)
+        self.assertIn("orig = texture(tex, v_texcoord);", shader)
 
     def test_pixel_shift_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,6 +67,7 @@ class CompositeShaderTests(unittest.TestCase):
                 False, True, Path(directory) / "shift.frag"
             )
 
+        self.assertIn("if (true) {", shader)
         self.assertIn("texelFetch(tex, sourceTexel, 0)", shader)
         self.assertIn("sourceTexel.x < 0", shader)
         self.assertIn("orig = vec4(0.0, 0.0, 0.0, 1.0);", shader)
@@ -76,6 +80,7 @@ class CompositeShaderTests(unittest.TestCase):
                 True, True, Path(directory) / "combined.frag"
             )
 
+        self.assertIn("if (true) {", shader)
         self.assertIn("texelFetch(tex, sourceTexel, 0)", shader)
         self.assertIn("bool off =", shader)
 
@@ -172,6 +177,9 @@ class RuntimeStatusTests(unittest.TestCase):
         if version >= 4:
             state["maskEnabled"] = mask_enabled
 
+        if version == 1:
+            state.pop("brightnessEnabled")
+
         return state
 
     def run_status(self, state, runtime_dir):
@@ -195,6 +203,21 @@ class RuntimeStatusTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def assert_brightness_disabled(self, payload):
+        self.assertIn("brightness-disabled", payload["class"])
+        self.assertNotIn("brightness-enabled", payload["class"])
+        self.assertIn("Brightness compensation: disabled", payload["tooltip"])
+        self.assertIn("Brightness: unchanged", payload["tooltip"])
+
+    def test_v1_migration_defaults_to_brightness_enabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.create_state(1)
+            payload = self.run_status(state, directory)
+
+        self.assertIn("brightness-enabled", payload["class"])
+        self.assertNotIn("brightness-disabled", payload["class"])
+        self.assertIn("Brightness compensation: enabled", payload["tooltip"])
+
     def test_v4_pixel_shift_only(self):
         with tempfile.TemporaryDirectory() as directory:
             state = self.create_state(4, False, True)
@@ -204,6 +227,7 @@ class RuntimeStatusTests(unittest.TestCase):
         self.assertNotIn("mask-0001", payload["class"])
         self.assertIn("Mask: disabled", payload["tooltip"])
         self.assertIn("Pixel shift: enabled", payload["tooltip"])
+        self.assert_brightness_disabled(payload)
 
     def test_v4_mask_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -212,6 +236,7 @@ class RuntimeStatusTests(unittest.TestCase):
 
         self.assertIn("mask-0001", payload["class"])
         self.assertIn("pixel-shift-disabled", payload["class"])
+        self.assert_brightness_disabled(payload)
 
     def test_v4_combined(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -220,6 +245,7 @@ class RuntimeStatusTests(unittest.TestCase):
 
         self.assertIn("mask-0001", payload["class"])
         self.assertIn("pixel-shift-enabled", payload["class"])
+        self.assert_brightness_disabled(payload)
 
     def test_v3_migration_defaults_to_mask_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -236,6 +262,105 @@ class RuntimeStatusTests(unittest.TestCase):
 
         self.assertIn("mask-0001", payload["class"])
         self.assertIn("pixel-shift-disabled", payload["class"])
+
+
+@unittest.skipUnless(shutil.which("jq"), "jq is not installed")
+class RuntimeStateLoadingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        match = re.search(
+            r"(?ms)^load_state\(\) \{\n.*?^\}",
+            SOURCE,
+        )
+        if match is None:
+            raise AssertionError("load_state() was not found")
+        cls.load_state_function = match.group(0)
+
+        match = re.search(
+            r"(?ms)^is_pixel_shift_only_session\(\) \{\n.*?^\}",
+            SOURCE,
+        )
+        if match is None:
+            raise AssertionError("is_pixel_shift_only_session() was not found")
+        cls.predicate_function = match.group(0)
+
+    def run_load_state(self, state):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            script = (
+                'die() { printf "%s\\n" "$*" >&2; exit 1; }\n'
+                'STATE_FILE="$1"\n'
+                "COMPENSATION_MAP='{}'\n"
+                + self.load_state_function
+                + '\nload_state\nprintf "%s\\n" '
+                  '"$MASK_ENABLED" "$PIXEL_SHIFT" "$BRIGHTNESS_ENABLED"\n'
+            )
+
+            result = subprocess.run(
+                ["bash", "-c", script, "hyproled-test", str(state_path)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.splitlines()
+
+    def run_pixel_shift_only_predicate(self, state):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            script = (
+                'STATE_FILE="$1"\n'
+                + self.predicate_function
+                + '\nis_pixel_shift_only_session\n'
+            )
+
+            result = subprocess.run(
+                ["bash", "-c", script, "hyproled-test", str(state_path)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        return result.returncode == 0
+
+    def test_v4_preserves_explicit_false_values(self):
+        state = RuntimeStatusTests().create_state(4, False, True)
+
+        self.assertEqual(
+            self.run_load_state(state),
+            ["false", "true", "false"],
+        )
+
+    def test_v3_defaults_to_mask_enabled(self):
+        state = RuntimeStatusTests().create_state(3, True, True)
+
+        self.assertEqual(
+            self.run_load_state(state),
+            ["true", "true", "false"],
+        )
+
+    def test_v1_uses_legacy_defaults(self):
+        state = RuntimeStatusTests().create_state(1)
+
+        self.assertEqual(
+            self.run_load_state(state),
+            ["true", "false", "true"],
+        )
+
+    def test_pixel_shift_only_predicate(self):
+        state = RuntimeStatusTests().create_state(4, False, True)
+        self.assertTrue(self.run_pixel_shift_only_predicate(state))
+
+        state["maskEnabled"] = True
+        self.assertFalse(self.run_pixel_shift_only_predicate(state))
+
+        legacy_state = RuntimeStatusTests().create_state(3, True, True)
+        self.assertFalse(self.run_pixel_shift_only_predicate(legacy_state))
 
 
 if __name__ == "__main__":

@@ -119,8 +119,8 @@ emit_status() {
 
   jq -c '
     . as $s
-    | ($s.brightnessEnabled // true) as $brightness_enabled
-    | ($s.maskEnabled // true) as $mask_enabled
+    | (if $s.version >= 2 then $s.brightnessEnabled else true end) as $brightness_enabled
+    | (if $s.version >= 4 then $s.maskEnabled else true end) as $mask_enabled
     | (
         [range(0; 4) as $pos
          | if (($pos - $s.phase + 4) % 4) < $s.offPixels
@@ -397,14 +397,14 @@ load_state() {
   MONITOR=$(jq -r '.monitor' "$STATE_FILE")
   AREA=$(jq -r '.area // ""' "$STATE_FILE")
   INVERT=$(jq -r '.invert' "$STATE_FILE")
-  MASK_ENABLED=$(jq -r '.maskEnabled // true' "$STATE_FILE")
+  MASK_ENABLED=$(jq -r 'if .version >= 4 then .maskEnabled else true end' "$STATE_FILE")
   PIXEL_SHIFT=$(jq -r '.pixelShift // false' "$STATE_FILE")
   BRIGHTNESS_DEVICE=$(jq -r '.brightnessDevice' "$STATE_FILE")
   BRIGHTNESS_ORIGINAL=$(jq -r '.brightnessOriginal' "$STATE_FILE")
   BRIGHTNESS_MAX=$(jq -r '.brightnessMax' "$STATE_FILE")
   BRIGHTNESS_APPLIED=$(jq -r '.brightnessApplied' "$STATE_FILE")
   COMPENSATION_PERCENT=$(jq -r '.compensationPercent' "$STATE_FILE")
-  BRIGHTNESS_ENABLED=$(jq -r '.brightnessEnabled // true' "$STATE_FILE")
+  BRIGHTNESS_ENABLED=$(jq -r 'if .version >= 2 then .brightnessEnabled else true end' "$STATE_FILE")
   state_map=$(jq -c '.compensationPercentOfMaxByPixelCount // empty' "$STATE_FILE")
   if [[ -n "$state_map" ]]; then COMPENSATION_MAP="$state_map"; fi
   [[ -n "$COMPENSATION_MAP" ]] || COMPENSATION_MAP='{}'
@@ -714,16 +714,22 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+is_pixel_shift_only_session() {
+  jq -e '
+    type == "object" and
+    .version == 4 and
+    .status == "active" and
+    .maskEnabled == false and
+    .pixelShift == true
+  ' "$STATE_FILE" >/dev/null 2>&1
+}
+
 # Disabling Pixel Shift in a Pixel Shift-only session leaves no active effect.
 if [[ "$ACTION" == "enable" &&
       "$PIXEL_SHIFT_SET" == true &&
       "$CLI_PIXEL_SHIFT" == false &&
       -f "$STATE_FILE" ]] &&
-   jq -e '
-     .status == "active" and
-     (.maskEnabled // true) == false and
-     (.pixelShift // false) == true
-   ' "$STATE_FILE" >/dev/null 2>&1; then
+   is_pixel_shift_only_session; then
   ACTION="off"
 fi
 
