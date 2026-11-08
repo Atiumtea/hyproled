@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-VERSION="0.3.0-dev"
+VERSION="0.4.0-dev"
  RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATE_DIR="$RUNTIME_DIR/hyproled"
 STATE_FILE="$STATE_DIR/state.json"
@@ -15,6 +15,16 @@ AREA_SET=false
 INVERT_SET=false
 OFF_PIXELS_SET=false
 MONITOR_SET=false
+
+PIXEL_SHIFT_SET=false
+CLI_PIXEL_SHIFT=false
+PIXEL_SHIFT=false
+
+MASK_ENABLED=true
+MASK_REQUESTED=false
+MASK_NEWLY_ENABLED=false
+SHADER_ONLY=false
+
 CLI_AREA=""
 CLI_INVERT=false
 CLI_OFF_PIXELS=""
@@ -34,6 +44,8 @@ Options:
   -o N        Number of disabled pixels in each 2x2 block (1-3).
   -s          Rotate the active 2x2 pattern by one phase.
   -m ID       Hyprland monitor ID (default: 0).
+  --pixel-shift     Shift the image right by one physical pixel.
+  --no-pixel-shift  Disable Pixel Shift without disabling the mask.
   --status    Print current status as Waybar-compatible JSON and exit.
   -h          Show this help.
 
@@ -67,7 +79,7 @@ emit_status() {
   # Do not expose malformed or partially written state to Waybar.
   if [[ ! -f "$STATE_FILE" || ! -r "$STATE_FILE" ]] || ! jq -e '
     type == "object" and
-    (.version == 1 or .version == 2) and
+    (.version == 1 or .version == 2 or .version == 3 or .version == 4) and
     (.status == "active" or .status == "applying" or .status == "restoring") and
     (.phase | type == "number" and floor == . and . >= 0 and . <= 3) and
     (.offPixels | type == "number" and floor == . and . >= 1 and . <= 3) and
@@ -87,7 +99,13 @@ emit_status() {
     else true end) and
     (if .version == 1 then true else
       (.brightnessEnabled | type == "boolean") and
-      (.compensationPercentOfMaxByPixelCount | type == "object")
+      (.compensationPercentOfMaxByPixelCount | type == "object") and
+      (if .version >= 3 then
+        (.pixelShift | type == "boolean") and
+        (if .version >= 4 then
+          (.maskEnabled | type == "boolean")
+        else true end)
+      else true end)
     end)
   ' "$STATE_FILE" >/dev/null 2>&1; then
     jq -cn --arg tooltip "$invalid_tooltip" '{
@@ -102,6 +120,7 @@ emit_status() {
   jq -c '
     . as $s
     | ($s.brightnessEnabled // true) as $brightness_enabled
+    | ($s.maskEnabled // true) as $mask_enabled
     | (
         [range(0; 4) as $pos
          | if (($pos - $s.phase + 4) % 4) < $s.offPixels
@@ -120,11 +139,17 @@ emit_status() {
            then "active"
            else "recovery required (" + $s.status + ")"
            end) +
-          "\nDisabled pixels: " + ($s.offPixels | tostring) + "/4" +
-          "\nPattern phase: " + ($s.phase | tostring) + "/3" +
+          (if $mask_enabled then
+            "\nDisabled pixels: " + ($s.offPixels | tostring) + "/4" +
+            "\nPattern phase: " + ($s.phase | tostring) + "/3"
+          else
+            "\nMask: disabled"
+          end) +
           "\nMonitor: " + ($s.monitor | tostring) +
           "\nArea: " + ($s.area // "full screen") +
           "\nInvert: " + (if $s.invert then "yes" else "no" end) +
+          "\nPixel shift: " +
+            (if ($s.pixelShift // false) then "enabled" else "disabled" end) +
           "\nBrightness compensation: " +
             (if $brightness_enabled then "enabled" else "disabled" end) +
           (if $brightness_enabled then
@@ -141,11 +166,19 @@ emit_status() {
         ),
         class: (
           if $s.status == "active" then
+            ["active"] +
+            (if $mask_enabled then
+              [
+                ("mask-" + $mask),
+                ("pixels-" + ($s.offPixels | tostring)),
+                ("phase-" + ($s.phase | tostring))
+              ]
+            else
+              []
+            end) +
             [
-              "active",
-              ("mask-" + $mask),
-              ("pixels-" + ($s.offPixels | tostring)),
-              ("phase-" + ($s.phase | tostring)),
+              ("pixel-shift-" +
+                (if ($s.pixelShift // false) then "enabled" else "disabled" end)),
               (if $brightness_enabled
                then "brightness-enabled"
                else "brightness-disabled"
@@ -198,12 +231,50 @@ notify_waybar() {
 }
 
 
+# Extract Pixel Shift options before getopts.
+LONG_ARGS=()
+
+while (($#)); do
+  case "$1" in
+    --pixel-shift)
+      [[ "$PIXEL_SHIFT_SET" == false || "$CLI_PIXEL_SHIFT" == true ]] ||
+        die "--pixel-shift conflicts with --no-pixel-shift"
+
+      PIXEL_SHIFT_SET=true
+      CLI_PIXEL_SHIFT=true
+      ;;
+
+    --no-pixel-shift)
+      [[ "$PIXEL_SHIFT_SET" == false || "$CLI_PIXEL_SHIFT" == false ]] ||
+        die "--no-pixel-shift conflicts with --pixel-shift"
+
+      PIXEL_SHIFT_SET=true
+      CLI_PIXEL_SHIFT=false
+      ;;
+
+    --)
+      LONG_ARGS+=("$@")
+      break
+      ;;
+
+    *)
+      LONG_ARGS+=("$1")
+      ;;
+  esac
+
+  shift
+done
+
+set -- "${LONG_ARGS[@]}"
+
 ACTION="enable"
 if [[ ${1:-} == "--status" ]]; then
-  [[ $# -eq 1 ]] || die "'--status' does not accept additional arguments"
+  [[ $# -eq 1 && "$PIXEL_SHIFT_SET" == false ]] ||
+    die "'--status' does not accept additional arguments"
   ACTION="status"
 elif [[ ${1:-} == "off" ]]; then
-  [[ $# -eq 1 ]] || die "'off' does not accept additional arguments"
+  [[ $# -eq 1 && "$PIXEL_SHIFT_SET" == false ]] ||
+    die "'off' does not accept additional arguments"
   ACTION="off"
 else
   OPTIND=1
@@ -224,6 +295,9 @@ else
 fi
 
 if [[ "$ACTION" == "enable" ]]; then
+  if [[ "$SHIFT" == true && "$PIXEL_SHIFT_SET" == true ]]; then
+    die "-s cannot be combined with Pixel Shift options"
+  fi
   if [[ "$SHIFT" == true && "$OFF_PIXELS_SET" == true ]]; then
     die "-o cannot be combined with -s; change the pixel count without -s so brightness compensation can be recalculated"
   fi
@@ -275,6 +349,9 @@ BRIGHTNESS_MAX=0
 BRIGHTNESS_APPLIED=0
 COMPENSATION_PERCENT=0
 COMPENSATION_MAP=""
+CONFIG_BRIGHTNESS_ENABLED=""
+CONFIG_BRIGHTNESS_DEVICE=""
+CONFIG_COMPENSATION_MAP=""
 CONFIG_DEFAULT_OFF_PIXELS=""
 CONFIG_DEFAULT_MONITOR=""
 CONFIG_DEFAULT_AREA=""
@@ -289,7 +366,7 @@ load_state() {
   [[ -s "$STATE_FILE" ]] || die "state file is missing or empty: $STATE_FILE"
   jq -e '
     type == "object" and
-    (.version == 1 or .version == 2) and
+    (.version == 1 or .version == 2 or .version == 3 or .version == 4) and
     (.status == "active" or .status == "applying" or .status == "restoring") and
     (.phase | type == "number" and . >= 0 and . <= 3) and
     (.offPixels | type == "number" and . >= 1 and . <= 3) and
@@ -304,7 +381,13 @@ load_state() {
     (.previousShader | type == "string") and
     (if .version == 1 then true else
       (.brightnessEnabled | type == "boolean") and
-      (.compensationPercentOfMaxByPixelCount | type == "object")
+      (.compensationPercentOfMaxByPixelCount | type == "object") and
+      (if .version >= 3 then
+        (.pixelShift | type == "boolean") and
+        (if .version >= 4 then
+          (.maskEnabled | type == "boolean")
+        else true end)
+      else true end)
     end)
   ' "$STATE_FILE" >/dev/null || die "state file is invalid or unsupported; refusing to change brightness or shader"
 
@@ -314,6 +397,8 @@ load_state() {
   MONITOR=$(jq -r '.monitor' "$STATE_FILE")
   AREA=$(jq -r '.area // ""' "$STATE_FILE")
   INVERT=$(jq -r '.invert' "$STATE_FILE")
+  MASK_ENABLED=$(jq -r '.maskEnabled // true' "$STATE_FILE")
+  PIXEL_SHIFT=$(jq -r '.pixelShift // false' "$STATE_FILE")
   BRIGHTNESS_DEVICE=$(jq -r '.brightnessDevice' "$STATE_FILE")
   BRIGHTNESS_ORIGINAL=$(jq -r '.brightnessOriginal' "$STATE_FILE")
   BRIGHTNESS_MAX=$(jq -r '.brightnessMax' "$STATE_FILE")
@@ -343,6 +428,8 @@ save_state() {
     --argjson offPixels "$OFF_PIXELS" \
     --argjson monitor "$MONITOR" \
     --argjson invert "$INVERT" \
+    --argjson maskEnabled "$MASK_ENABLED" \
+    --argjson pixelShift "$PIXEL_SHIFT" \
     --argjson brightnessOriginal "$BRIGHTNESS_ORIGINAL" \
     --argjson brightnessMax "$BRIGHTNESS_MAX" \
     --argjson brightnessApplied "$BRIGHTNESS_APPLIED" \
@@ -350,7 +437,7 @@ save_state() {
     --argjson brightnessEnabled "$BRIGHTNESS_ENABLED" \
     --argjson compensationMap "$COMPENSATION_MAP" \
     '{
-      version: 2,
+      version: 4,
       status: $status,
       enabled: ($status != "restoring"),
       phase: $phase,
@@ -358,6 +445,8 @@ save_state() {
       monitor: $monitor,
       area: (if $area == "" then null else $area end),
       invert: $invert,
+      maskEnabled: $maskEnabled,
+      pixelShift: $pixelShift,
       brightnessDevice: $brightnessDevice,
       brightnessOriginal: $brightnessOriginal,
       brightnessMax: $brightnessMax,
@@ -433,9 +522,13 @@ load_config() {
   CONFIG_DEFAULT_MONITOR=$(jq -r '.defaults.monitor' "$CONFIG_FILE")
   CONFIG_DEFAULT_AREA=$(jq -r '.defaults.area // ""' "$CONFIG_FILE")
   CONFIG_DEFAULT_INVERT=$(jq -r '.defaults.invert' "$CONFIG_FILE")
-  BRIGHTNESS_ENABLED=$(jq -r '.brightness.enabled' "$CONFIG_FILE")
-  BRIGHTNESS_DEVICE=$(jq -r '.brightness.device' "$CONFIG_FILE")
-  COMPENSATION_MAP=$(jq -c '.brightness.compensationPercentOfMaxByPixelCount' "$CONFIG_FILE")
+  CONFIG_BRIGHTNESS_ENABLED=$(jq -r '.brightness.enabled' "$CONFIG_FILE")
+  CONFIG_BRIGHTNESS_DEVICE=$(jq -r '.brightness.device' "$CONFIG_FILE")
+  CONFIG_COMPENSATION_MAP=$(jq -c '.brightness.compensationPercentOfMaxByPixelCount' "$CONFIG_FILE")
+
+  BRIGHTNESS_ENABLED="$CONFIG_BRIGHTNESS_ENABLED"
+  BRIGHTNESS_DEVICE="$CONFIG_BRIGHTNESS_DEVICE"
+  COMPENSATION_MAP="$CONFIG_COMPENSATION_MAP"
 }
 
 setup_hyprland() {
@@ -514,24 +607,53 @@ uniform sampler2D tex;
 uniform int wl_output;
 layout(location = 0) out vec4 fragColor;
 void main(){
-  vec4 orig = texture(tex, v_texcoord);
-  if(wl_output != ${MONITOR}) { fragColor = orig; return; }
+  if(wl_output != ${MONITOR}) {
+    fragColor = texture(tex, v_texcoord);
+    return;
+  }
+
+  vec4 orig;
+
+  if (${PIXEL_SHIFT}) {
+    ivec2 texSize = textureSize(tex, 0);
+    ivec2 texel = ivec2(floor(v_texcoord * vec2(texSize)));
+    ivec2 sourceTexel = texel - ivec2(1, 0);
+
+    if (sourceTexel.x < 0 || sourceTexel.x >= texSize.x ||
+        sourceTexel.y < 0 || sourceTexel.y >= texSize.y) {
+      orig = vec4(0.0, 0.0, 0.0, 1.0);
+    } else {
+      orig = texelFetch(tex, sourceTexel, 0);
+    }
+  } else {
+    orig = texture(tex, v_texcoord);
+  }
+EOF_SHADER
+
+    if [[ "$MASK_ENABLED" == true ]]; then
+      cat <<EOF_MASK
   vec2 fc = gl_FragCoord.xy;
   float pos = mod(fc.x, 2.0) + 2.0 * mod(fc.y, 2.0);
   bool off = mod(pos - float(${PHASE}), 4.0) < float(${OFF_PIXELS});
   vec4 pixel = off ? vec4(0.0, 0.0, 0.0, 1.0) : orig;
-EOF_SHADER
-    if [[ -n "$AREA" ]]; then
-      IFS=: read -r x y w h <<< "$AREA"
-      printf '  bool inRegion = (fc.x >= %s.0 && fc.x <= (%s.0+%s.0) && fc.y >= %s.0 && fc.y <= (%s.0+%s.0));\n' "$x" "$x" "$w" "$y" "$y" "$h"
-      if [[ "$INVERT" == true ]]; then
-        printf '  fragColor = inRegion ? orig : pixel;\n'
+EOF_MASK
+
+      if [[ -n "$AREA" ]]; then
+        IFS=: read -r x y w h <<< "$AREA"
+        printf '  bool inRegion = (fc.x >= %s.0 && fc.x <= (%s.0+%s.0) && fc.y >= %s.0 && fc.y <= (%s.0+%s.0));\n' "$x" "$x" "$w" "$y" "$y" "$h"
+
+        if [[ "$INVERT" == true ]]; then
+          printf '  fragColor = inRegion ? orig : pixel;\n'
+        else
+          printf '  fragColor = inRegion ? pixel : orig;\n'
+        fi
       else
-        printf '  fragColor = inRegion ? pixel : orig;\n'
+        printf '  fragColor = pixel;\n'
       fi
     else
-      printf '  fragColor = pixel;\n'
+      printf '  fragColor = orig;\n'
     fi
+
     printf '}\n'
   } > "$destination"
 }
@@ -592,6 +714,19 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Disabling Pixel Shift in a Pixel Shift-only session leaves no active effect.
+if [[ "$ACTION" == "enable" &&
+      "$PIXEL_SHIFT_SET" == true &&
+      "$CLI_PIXEL_SHIFT" == false &&
+      -f "$STATE_FILE" ]] &&
+   jq -e '
+     .status == "active" and
+     (.maskEnabled // true) == false and
+     (.pixelShift // false) == true
+   ' "$STATE_FILE" >/dev/null 2>&1; then
+  ACTION="off"
+fi
+
 if [[ "$ACTION" == "off" ]]; then
   if [[ ! -f "$STATE_FILE" ]]; then
     setup_hyprland
@@ -651,10 +786,24 @@ fi
 
 load_config
 
+if [[ "$SHIFT" == true && "$PIXEL_SHIFT_SET" == true ]]; then
+  die "-s cannot be combined with Pixel Shift options"
+fi
+
+if [[ "$PIXEL_SHIFT_SET" == true && "$CLI_PIXEL_SHIFT" == false && ! -f "$STATE_FILE" ]]; then
+  die "--no-pixel-shift requires an active effect"
+fi
+
+MASK_REQUESTED=false
+if [[ "$PIXEL_SHIFT_SET" == false || "$AREA_SET" == true || "$INVERT_SET" == true || "$OFF_PIXELS_SET" == true ]]; then
+  MASK_REQUESTED=true
+fi
+
 if [[ "$SHIFT" == true ]]; then
-  [[ -f "$STATE_FILE" ]] || die "cannot use -s before enabling hyproled"
+  [[ -f "$STATE_FILE" ]] || die "cannot use -s before enabling the mask"
   load_state
   [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
+  [[ "$MASK_ENABLED" == true ]] || die "-s requires the mask to be active"
   [[ "$OFF_PIXELS_SET" == false ]] || die "-o cannot be combined with -s"
   [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
   [[ "$INVERT_SET" == false ]] || INVERT=true
@@ -664,6 +813,14 @@ else
   if [[ -f "$STATE_FILE" ]]; then
     load_state
     [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
+
+    if [[ "$MASK_REQUESTED" == true ]]; then
+      if [[ "$MASK_ENABLED" == false ]]; then
+        MASK_NEWLY_ENABLED=true
+      fi
+      MASK_ENABLED=true
+    fi
+
     [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
     [[ "$INVERT_SET" == false ]] || INVERT=true
     [[ "$OFF_PIXELS_SET" == false ]] || OFF_PIXELS="$CLI_OFF_PIXELS"
@@ -674,11 +831,32 @@ else
     MONITOR="$CONFIG_DEFAULT_MONITOR"
     AREA="$CONFIG_DEFAULT_AREA"
     INVERT="$CONFIG_DEFAULT_INVERT"
+
     [[ "$OFF_PIXELS_SET" == false ]] || OFF_PIXELS="$CLI_OFF_PIXELS"
     [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
     [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
     [[ "$INVERT_SET" == false ]] || INVERT="$CLI_INVERT"
+
+    MASK_ENABLED="$MASK_REQUESTED"
   fi
+fi
+
+if [[ "$PIXEL_SHIFT_SET" == true ]]; then
+  PIXEL_SHIFT="$CLI_PIXEL_SHIFT"
+fi
+
+if [[ "$MASK_ENABLED" == false && "$PIXEL_SHIFT" == false ]]; then
+  die "no effects are enabled"
+fi
+
+# Toggling Pixel Shift alone must not recalculate brightness compensation.
+if [[ -f "$STATE_FILE" &&
+      "$SHIFT" != true &&
+      "$PIXEL_SHIFT_SET" == true &&
+      "$AREA_SET" == false &&
+      "$INVERT_SET" == false &&
+      "$OFF_PIXELS_SET" == false ]]; then
+  SHADER_ONLY=true
 fi
 
 [[ "$OFF_PIXELS" =~ ^[1-3]$ ]] || die "invalid pixel count in state"
@@ -695,7 +873,24 @@ if [[ -f "$STATE_FILE" ]]; then
   if [[ "$current_shader" != "$ACTIVE_SHADER" && "$current_shader" != "$PREVIOUS_SHADER" ]]; then
     die "another screen shader was installed while hyproled was active; refusing to overwrite it: $current_shader"
   fi
-  if [[ "$SHIFT" != true ]]; then
+
+  if [[ "$MASK_NEWLY_ENABLED" == true ]]; then
+    # A mask is being added to an existing Pixel Shift-only session.
+    # Start a new brightness baseline from the current configuration.
+    BRIGHTNESS_ENABLED="$CONFIG_BRIGHTNESS_ENABLED"
+    BRIGHTNESS_DEVICE="$CONFIG_BRIGHTNESS_DEVICE"
+    COMPENSATION_MAP="$CONFIG_COMPENSATION_MAP"
+
+    current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+    current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
+    (( current_max > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
+
+    BRIGHTNESS_ORIGINAL="$current_brightness"
+    BRIGHTNESS_MAX="$current_max"
+    BRIGHTNESS_APPLIED="$current_brightness"
+  elif [[ "$MASK_ENABLED" == true &&
+          "$SHIFT" != true &&
+          "$SHADER_ONLY" != true ]]; then
     current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
     current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
     (( current_max > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
@@ -707,19 +902,40 @@ if [[ -f "$STATE_FILE" ]]; then
   fi
 else
   PREVIOUS_SHADER="$current_shader"
-  current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
-  BRIGHTNESS_ORIGINAL="$current_brightness"
-  BRIGHTNESS_MAX=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
-  (( BRIGHTNESS_MAX > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
+
+  if [[ "$MASK_ENABLED" == true ]]; then
+    current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+    BRIGHTNESS_ORIGINAL="$current_brightness"
+    BRIGHTNESS_MAX=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
+    (( BRIGHTNESS_MAX > 0 )) || die "brightness device '$BRIGHTNESS_DEVICE' reported an invalid maximum"
+    BRIGHTNESS_APPLIED="$current_brightness"
+  else
+    # Pixel Shift-only sessions do not own or restore brightness.
+    BRIGHTNESS_ENABLED=false
+    BRIGHTNESS_ORIGINAL=0
+    BRIGHTNESS_MAX=1
+    BRIGHTNESS_APPLIED=0
+  fi
+
   user_delta=0
 fi
 
-COMPENSATION_PERCENT=$(compensation_for_pixels "$OFF_PIXELS") || die "invalid pixel count"
-if [[ "$SHIFT" == true ]]; then
-  # -s only rotates the shader. Brightness is deliberately not touched.
+if [[ "$MASK_ENABLED" == true ]]; then
+  COMPENSATION_PERCENT=$(compensation_for_pixels "$OFF_PIXELS") || die "invalid pixel count"
+else
+  COMPENSATION_PERCENT=0
+fi
+
+ROLLBACK_SHADER="$current_shader"
+
+if [[ "$MASK_ENABLED" == false ]]; then
+  # No brightness access or writes in Pixel Shift-only mode.
+  requested_brightness=0
+  ROLLBACK_BRIGHTNESS=0
+elif [[ "$SHIFT" == true || "$SHADER_ONLY" == true ]]; then
   current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
+  requested_brightness="$current_brightness"
   ROLLBACK_BRIGHTNESS="$current_brightness"
-  ROLLBACK_SHADER="$current_shader"
 else
   if [[ "$BRIGHTNESS_ENABLED" == true ]]; then
     adjusted_base="$BRIGHTNESS_ORIGINAL"
@@ -728,8 +944,8 @@ else
   else
     requested_brightness="$current_brightness"
   fi
+
   ROLLBACK_BRIGHTNESS="$current_brightness"
-  ROLLBACK_SHADER="$current_shader"
 fi
 
 NEW_SHADER=$(mktemp "$STATE_DIR/shader.XXXXXX.glsl")
@@ -743,12 +959,19 @@ OLD_ACTIVE_SHADER="$ACTIVE_SHADER"
 ACTIVE_SHADER="$NEW_SHADER"
 STATUS="applying"
 RESTORE_TARGET=""
-if [[ "$SHIFT" != true ]]; then BRIGHTNESS_APPLIED="$requested_brightness"; fi
+if [[ "$MASK_ENABLED" == true &&
+      "$SHIFT" != true &&
+      "$SHADER_ONLY" != true ]]; then
+  BRIGHTNESS_APPLIED="$requested_brightness"
+fi
 
 ROLLBACK_ENABLED=true
 save_state || die "could not write state file"
 set_shader "$ACTIVE_SHADER" || die "could not apply the screen shader"
-if [[ "$SHIFT" != true && "$BRIGHTNESS_ENABLED" == true ]]; then
+if [[ "$MASK_ENABLED" == true &&
+      "$SHIFT" != true &&
+      "$SHADER_ONLY" != true &&
+      "$BRIGHTNESS_ENABLED" == true ]]; then
   BRIGHTNESS_WRITE_ATTEMPTED=true
   actual_brightness=$(set_brightness "$requested_brightness") || die "could not apply brightness compensation"
   BRIGHTNESS_APPLIED="$actual_brightness"
@@ -766,11 +989,23 @@ fi
 
 notify_waybar
 
-if [[ "$SHIFT" == true ]]; then
-  printf 'hyproled: shifted to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
+if [[ "$SHADER_ONLY" == true ]]; then
+  if [[ "$PIXEL_SHIFT" == true ]]; then
+    pixel_shift_status="enabled"
+  else
+    pixel_shift_status="disabled"
+  fi
+
+  printf 'hyproled: pixel shift %s; brightness unchanged (%s)\n' \
+    "$pixel_shift_status" "$ROLLBACK_BRIGHTNESS"
+elif [[ "$SHIFT" == true ]]; then
+  printf 'hyproled: mask advanced to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
+elif [[ "$MASK_ENABLED" == false ]]; then
+  printf 'hyproled: Pixel Shift enabled; mask disabled; brightness unchanged\n'
 elif [[ "$BRIGHTNESS_ENABLED" == true ]]; then
-  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; brightness %s -> %s (%s%% compensation)\n' \
-    "$OFF_PIXELS" "$ROLLBACK_BRIGHTNESS" "$BRIGHTNESS_APPLIED" "$COMPENSATION_PERCENT"
+  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; Pixel Shift %s; brightness %s -> %s (%s%% compensation)\n' \
+    "$OFF_PIXELS" "$PIXEL_SHIFT" "$ROLLBACK_BRIGHTNESS" "$BRIGHTNESS_APPLIED" "$COMPENSATION_PERCENT"
 else
-  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; brightness compensation disabled\n' "$OFF_PIXELS"
+  printf 'hyproled: enabled; %s pixel(s) disabled per 2x2 block; Pixel Shift %s; brightness compensation disabled\n' \
+    "$OFF_PIXELS" "$PIXEL_SHIFT"
 fi
