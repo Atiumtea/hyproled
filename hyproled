@@ -21,7 +21,7 @@ MONITOR_SET=false
 PIXEL_SHIFT_SET=false
 CLI_PIXEL_SHIFT=false
 PIXEL_SHIFT=false
-PIXEL_SHIFT_MODE="fixed"
+PIXEL_SHIFT_MODE="orbit-2x2"
 PIXEL_SHIFT_INDEX=0
 PIXEL_SHIFT_DX=1
 PIXEL_SHIFT_DY=0
@@ -189,7 +189,9 @@ emit_status() {
     . as $s
     | (if $s.version >= 2 then $s.brightnessEnabled else true end) as $brightness_enabled
     | (if $s.version >= 4 then $s.maskEnabled else true end) as $mask_enabled
-    | (if $s.version >= 5 then $s.pixelShiftMode else "fixed" end) as $shift_mode
+    | (if $s.version >= 5 then $s.pixelShiftMode
+       elif ($s.pixelShift // false) then "fixed"
+       else "orbit-2x2" end) as $shift_mode
     | (if $s.version >= 5 then $s.pixelShiftIndex else 0 end) as $shift_index
     | (if $shift_mode == "fixed" then 1
        elif $shift_mode == "linear-horizontal" or $shift_mode == "linear-vertical" then 2
@@ -519,7 +521,12 @@ load_state() {
   INVERT=$(jq -r '.invert' "$STATE_FILE")
   MASK_ENABLED=$(jq -r 'if .version >= 4 then .maskEnabled else true end' "$STATE_FILE")
   PIXEL_SHIFT=$(jq -r '.pixelShift // false' "$STATE_FILE")
-  PIXEL_SHIFT_MODE=$(jq -r 'if .version >= 5 then .pixelShiftMode else "fixed" end' "$STATE_FILE")
+  PIXEL_SHIFT_MODE=$(jq -r '
+    if .version >= 5 then .pixelShiftMode
+    elif (.pixelShift // false) then "fixed"
+    else "orbit-2x2"
+    end
+  ' "$STATE_FILE")
   PIXEL_SHIFT_INDEX=$(jq -r 'if .version >= 5 then .pixelShiftIndex else 0 end' "$STATE_FILE")
   BRIGHTNESS_DEVICE=$(jq -r '.brightnessDevice' "$STATE_FILE")
   BRIGHTNESS_ORIGINAL=$(jq -r '.brightnessOriginal' "$STATE_FILE")

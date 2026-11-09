@@ -227,6 +227,9 @@ class PixelShiftModeTests(unittest.TestCase):
                 ).split()))
                 self.assertEqual(actual, offset, f"{mode}[{index}]")
 
+    def test_new_sessions_default_to_orbit_2x2(self):
+        self.assertRegex(SOURCE, r'(?m)^PIXEL_SHIFT_MODE="orbit-2x2"$')
+
     def test_mode_selection_preserves_or_resets_position(self):
         script = (
             self.functions
@@ -267,7 +270,7 @@ class PixelShiftModeTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which("jq"), "jq is not installed")
 class RuntimeStatusTests(unittest.TestCase):
     def create_state(self, version, mask_enabled=True, pixel_shift=False,
-                     pixel_shift_mode="fixed", pixel_shift_index=0):
+                     pixel_shift_mode="orbit-2x2", pixel_shift_index=0):
         state = {
             "version": version,
             "status": "active",
@@ -484,6 +487,14 @@ class RuntimeStateLoadingTests(unittest.TestCase):
             ["false", "true", "false", "fixed", "0"],
         )
 
+    def test_v4_without_pixel_shift_uses_orbit_default(self):
+        state = RuntimeStatusTests().create_state(4, False, False)
+
+        self.assertEqual(
+            self.run_load_state(state),
+            ["false", "false", "false", "orbit-2x2", "0"],
+        )
+
     def test_v5_loads_selected_mode_and_position(self):
         state = RuntimeStatusTests().create_state(
             5, False, True, "orbit-3x3", 7
@@ -506,7 +517,7 @@ class RuntimeStateLoadingTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_load_state(state),
-            ["true", "false", "true", "fixed", "0"],
+            ["true", "false", "true", "orbit-2x2", "0"],
         )
 
     def test_save_state_persists_v5_mode_and_index(self):
