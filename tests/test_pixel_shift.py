@@ -627,6 +627,7 @@ class RuntimeStatusTests(unittest.TestCase):
             state = self.create_state(1)
             payload = self.run_status(state, directory)
 
+        self.assertIn("mask-1000", payload["class"])
         self.assertIn("brightness-enabled", payload["class"])
         self.assertNotIn("brightness-disabled", payload["class"])
         self.assertIn("Brightness compensation: enabled", payload["tooltip"])
@@ -637,7 +638,9 @@ class RuntimeStatusTests(unittest.TestCase):
             payload = self.run_status(state, directory)
 
         self.assertIn("pixel-shift-enabled", payload["class"])
-        self.assertNotIn("mask-0001", payload["class"])
+        self.assertFalse(
+            any(class_name.startswith("mask-") for class_name in payload["class"])
+        )
         self.assertIn("Mask: disabled", payload["tooltip"])
         self.assertIn("Pixel shift: enabled", payload["tooltip"])
         self.assert_brightness_disabled(payload)
@@ -647,7 +650,7 @@ class RuntimeStatusTests(unittest.TestCase):
             state = self.create_state(4, True, False)
             payload = self.run_status(state, directory)
 
-        self.assertIn("mask-0001", payload["class"])
+        self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-disabled", payload["class"])
         self.assert_brightness_disabled(payload)
 
@@ -656,7 +659,7 @@ class RuntimeStatusTests(unittest.TestCase):
             state = self.create_state(4, True, True)
             payload = self.run_status(state, directory)
 
-        self.assertIn("mask-0001", payload["class"])
+        self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-enabled", payload["class"])
         self.assert_brightness_disabled(payload)
 
@@ -682,7 +685,7 @@ class RuntimeStatusTests(unittest.TestCase):
             state = self.create_state(3, True, True)
             payload = self.run_status(state, directory)
 
-        self.assertIn("mask-0001", payload["class"])
+        self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-enabled", payload["class"])
 
     def test_v2_migration_defaults_to_mask_only(self):
@@ -690,7 +693,7 @@ class RuntimeStatusTests(unittest.TestCase):
             state = self.create_state(2)
             payload = self.run_status(state, directory)
 
-        self.assertIn("mask-0001", payload["class"])
+        self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-disabled", payload["class"])
 
 
