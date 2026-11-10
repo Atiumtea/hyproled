@@ -344,7 +344,7 @@ class PixelShiftModeTests(unittest.TestCase):
             ),
             (
                 "MASK_ENABLED=true PIXEL_SHIFT=true PHASE=3 PIXEL_SHIFT_MODE=orbit-2x2 PIXEL_SHIFT_INDEX=3",
-                "0 0 0",
+                "1 0 0",
                 "combined effects",
             ),
             (
@@ -376,6 +376,158 @@ class PixelShiftModeTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(result.stdout.strip(), expected)
+
+    def run_combined_sequence(self, mode, phase=0, index=0):
+        count = int(self.run_bash(f'pixel_shift_mode_count "{mode}"'))
+        steps = 4 * count
+        script = (
+            self.functions
+            + f"\nMASK_ENABLED=true PIXEL_SHIFT=true PHASE={phase} "
+              f'PIXEL_SHIFT_MODE="{mode}" PIXEL_SHIFT_INDEX={index}\n'
+            + f"for ((step=0; step<{steps}; step++)); do\n"
+            + '  printf "%s %s\\n" "$PHASE" "$PIXEL_SHIFT_INDEX"\n'
+            + "  previous_phase=$PHASE\n"
+            + "  previous_index=$PIXEL_SHIFT_INDEX\n"
+            + "  advance_active_effects || exit $?\n"
+            + '  [[ "$PHASE" != "$previous_phase" ]] || exit 20\n'
+            + '  [[ "$PIXEL_SHIFT_INDEX" != "$previous_index" ]] || exit 21\n'
+            + "done\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return [tuple(map(int, line.split())) for line in result.stdout.splitlines()]
+
+    def test_combined_sequence_covers_every_pair_from_every_initial_state(self):
+        modes = {
+            "linear-horizontal": 2,
+            "linear-vertical": 2,
+            "orbit-2x2": 4,
+            "orbit-3x3": 9,
+        }
+        for mode, count in modes.items():
+            steps = 4 * count
+            script = (
+                self.functions
+                + f'\nPIXEL_SHIFT=true MASK_ENABLED=true PIXEL_SHIFT_MODE="{mode}"\n'
+                + f"for ((initial_phase=0; initial_phase<4; initial_phase++)); do\n"
+                + f"  for ((initial_index=0; initial_index<{count}; initial_index++)); do\n"
+                + "    PHASE=$initial_phase\n"
+                + "    PIXEL_SHIFT_INDEX=$initial_index\n"
+                + "    unset seen\n"
+                + "    declare -A seen=()\n"
+                + f"    for ((step=0; step<{steps}; step++)); do\n"
+                + '      key="$PHASE:$PIXEL_SHIFT_INDEX"\n'
+                + '      [[ -z "${seen[$key]+x}" ]] || exit 30\n'
+                + '      seen[$key]=1\n'
+                + "      previous_phase=$PHASE\n"
+                + "      previous_index=$PIXEL_SHIFT_INDEX\n"
+                + "      advance_active_effects || exit $?\n"
+                + '      [[ "$PHASE" != "$previous_phase" ]] || exit 31\n'
+                + '      [[ "$PIXEL_SHIFT_INDEX" != "$previous_index" ]] || exit 32\n'
+                + "    done\n"
+                + '    [[ "$PHASE" == "$initial_phase" ]] || exit 33\n'
+                + '    [[ "$PIXEL_SHIFT_INDEX" == "$initial_index" ]] || exit 34\n'
+                + f'    [[ "${{#seen[@]}}" -eq {steps} ]] || exit 35\n'
+                + "  done\n"
+                + "done\n"
+                + "printf 'ok\\n'\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, f"{mode}: {result.stdout}{result.stderr}")
+            self.assertEqual(result.stdout.strip(), "ok", mode)
+
+    def test_full_pair_distribution_balances_the_exact_mask_formula(self):
+        # This is the same output-space formula emitted by make_shader().
+        self.assertIn(
+            "float pos = mod(fc.x, 2.0) + 2.0 * mod(fc.y, 2.0);",
+            SOURCE,
+        )
+        self.assertIn(
+            "bool off = mod(pos - float(${PHASE}), 4.0) < float(${OFF_PIXELS});",
+            SOURCE,
+        )
+
+        modes = (
+            "linear-horizontal",
+            "linear-vertical",
+            "orbit-2x2",
+            "orbit-3x3",
+        )
+        for mode in modes:
+            count = int(self.run_bash(f'pixel_shift_mode_count "{mode}"'))
+            pairs = self.run_combined_sequence(mode)
+            self.assertEqual(len(pairs), 4 * count, mode)
+            self.assertEqual(len(set(pairs)), 4 * count, mode)
+
+            # Read actual (dx,dy) values from the production Bash function;
+            # do not duplicate or approximate the mode's displacement table.
+            offsets = []
+            for index in range(count):
+                offset = self.run_bash(
+                    f'pixel_shift_position "{mode}" "{index}"'
+                )
+                offsets.append(tuple(map(int, offset.split())))
+
+            for off_pixels in (1, 2, 3):
+                masked_counts = [0, 0, 0, 0]
+                for phase, index in pairs:
+                    dx, dy = offsets[index]
+                    for source_y in range(2):
+                        for source_x in range(2):
+                            # A source texel q is sampled at output q + (dx,dy).
+                            output_x = (source_x + dx) % 2
+                            output_y = (source_y + dy) % 2
+                            pos = output_x + 2 * output_y
+                            # GLSL mod(pos - phase, 4.0) for integer residues.
+                            is_off = ((pos - phase) % 4) < off_pixels
+                            if is_off:
+                                masked_counts[source_x + 2 * source_y] += 1
+
+                expected = count * off_pixels
+                self.assertEqual(
+                    masked_counts,
+                    [expected] * 4,
+                    f"{mode}, OFF_PIXELS={off_pixels}",
+                )
+
+    def test_previous_lockstep_was_not_uniform_for_non_coprime_modes(self):
+        # Regression evidence: the former +1/+1 lockstep only visited lcm(4,K)
+        # pairs and gave different off-pixel counts to 2x2 source parities.
+        cases = {
+            "linear-horizontal": 2,
+            "orbit-2x2": 4,
+        }
+        for mode, count in cases.items():
+            offsets = [
+                tuple(map(int, self.run_bash(
+                    f'pixel_shift_position "{mode}" "{index}"'
+                ).split()))
+                for index in range(count)
+            ]
+            # lcm(4, K) is four for both of these non-coprime modes.
+            period = 4
+            pairs = [(step % 4, step % count) for step in range(period)]
+            off_counts = [0, 0, 0, 0]
+            for phase, index in pairs:
+                dx, dy = offsets[index]
+                for source_y in range(2):
+                    for source_x in range(2):
+                        output_x = (source_x + dx) % 2
+                        output_y = (source_y + dy) % 2
+                        pos = output_x + 2 * output_y
+                        if ((pos - phase) % 4) < 1:
+                            off_counts[source_x + 2 * source_y] += 1
+            self.assertNotEqual(len(set(off_counts)), 1, mode)
 
     def test_advance_active_effects_does_not_partially_mutate_on_invalid_mode(self):
         script = (

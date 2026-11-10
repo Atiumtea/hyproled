@@ -103,14 +103,50 @@ advance_active_effects() {
   local next_phase="$PHASE"
   local next_index="$PIXEL_SHIFT_INDEX"
   local count
+  local phase_step=1
   local advanced=false
 
-  if [[ "$MASK_ENABLED" == true ]]; then
+  if [[ "$MASK_ENABLED" == true && "$PIXEL_SHIFT" == true ]]; then
+    count=$(pixel_shift_mode_count "$PIXEL_SHIFT_MODE") || return 1
+
+    if (( count > 1 )); then
+      # Traverse the complete Mask phase × Pixel Shift position space.
+      # Pixel Shift always advances to its next position. The mask phase
+      # uses a non-uniform increment for modes whose period shares a factor
+      # with four, preventing a fixed phase/offset correlation.
+      case "$count" in
+        2)
+          # Phase increments 1,2 across the two shift positions: total 3.
+          if (( PIXEL_SHIFT_INDEX == 0 )); then
+            phase_step=1
+          else
+            phase_step=2
+          fi
+          ;;
+        4)
+          # Phase increments 1,1,1,2 across the four shift positions: total 5.
+          if (( PIXEL_SHIFT_INDEX == 3 )); then
+            phase_step=2
+          fi
+          ;;
+        *)
+          # For K coprime with four, +1/+1 already traverses every pair.
+          phase_step=1
+          ;;
+      esac
+
+      next_phase=$(( (PHASE + phase_step) % 4 ))
+      next_index=$(( (PIXEL_SHIFT_INDEX + 1) % count ))
+      advanced=true
+    else
+      # Fixed has no dynamic next position; only the mask advances.
+      next_phase=$(( (PHASE + 1) % 4 ))
+      advanced=true
+    fi
+  elif [[ "$MASK_ENABLED" == true ]]; then
     next_phase=$(( (PHASE + 1) % 4 ))
     advanced=true
-  fi
-
-  if [[ "$PIXEL_SHIFT" == true ]]; then
+  elif [[ "$PIXEL_SHIFT" == true ]]; then
     count=$(pixel_shift_mode_count "$PIXEL_SHIFT_MODE") || return 1
 
     if (( count > 1 )); then
@@ -121,6 +157,7 @@ advance_active_effects() {
 
   [[ "$advanced" == true ]] || return 2
 
+  # Commit both in-memory values only after all calculations succeeded.
   PHASE="$next_phase"
   PIXEL_SHIFT_INDEX="$next_index"
 }
