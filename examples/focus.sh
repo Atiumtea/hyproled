@@ -14,4 +14,4 @@ area=$(hyprctl activewindow -j | jq -r --arg sf "$scalefactor" '
   "\($x):\($y):\($w):\($h)"
 ')
 
-hyproled -i -a $area
+hyproled -i -a "$area"
