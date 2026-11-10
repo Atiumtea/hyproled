@@ -13,7 +13,8 @@ PREFERENCES_FILE="$PREFERENCES_DIR/preferences.json"
 LOCK_FILE="$STATE_DIR/lock"
 CONFIG_FILE="${HYPROLED_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hyproled/config.json}"
 
-SHIFT=false
+MASK_STEP=false
+STEP_ALL=false
 SHIFT_STEP=false
 SHIFT_MODE_SET=false
 AREA_SET=false
@@ -98,6 +99,32 @@ advance_pixel_shift() {
   PIXEL_SHIFT_INDEX=$(( (PIXEL_SHIFT_INDEX + 1) % count ))
 }
 
+advance_active_effects() {
+  local next_phase="$PHASE"
+  local next_index="$PIXEL_SHIFT_INDEX"
+  local count
+  local advanced=false
+
+  if [[ "$MASK_ENABLED" == true ]]; then
+    next_phase=$(( (PHASE + 1) % 4 ))
+    advanced=true
+  fi
+
+  if [[ "$PIXEL_SHIFT" == true ]]; then
+    count=$(pixel_shift_mode_count "$PIXEL_SHIFT_MODE") || return 1
+
+    if (( count > 1 )); then
+      next_index=$(( (PIXEL_SHIFT_INDEX + 1) % count ))
+      advanced=true
+    fi
+  fi
+
+  [[ "$advanced" == true ]] || return 2
+
+  PHASE="$next_phase"
+  PIXEL_SHIFT_INDEX="$next_index"
+}
+
 show_help() {
   cat <<EOF_HELP
 Usage: $(basename "$0") [OPTION]... [off]
@@ -110,12 +137,13 @@ Options:
   -a x:y:w:h  Apply the effect only to this area.
   -i          Invert the selected area.
   -o N        Number of disabled pixels in each 2x2 block (1-3).
-  -s          Rotate the active 2x2 pattern by one phase.
+  -s          Advance every active dynamic effect by one step.
   -m ID       Hyprland monitor ID (default: 0).
   --pixel-shift     Shift the image right by one physical pixel.
   --no-pixel-shift  Disable Pixel Shift without disabling the mask.
   --pixel-shift-mode MODE  Select fixed, linear-horizontal, linear-vertical, orbit-2x2, or orbit-3x3.
-  --shift-step      Advance Pixel Shift to the next position.
+  --mask-step       Advance only the mask phase.
+  --shift-step      Advance only the Pixel Shift position.
   --mask            Enable the mask without changing Pixel Shift.
   --no-mask         Disable the mask without changing Pixel Shift.
   --brightness-compensation     Enable brightness compensation.
@@ -409,6 +437,12 @@ while (($#)); do
       shift
       ;;
 
+    --mask-step)
+      [[ "$MASK_STEP" == false ]] || die "--mask-step may only be specified once"
+      MASK_STEP=true
+      shift
+      ;;
+
     --shift-step)
       [[ "$SHIFT_STEP" == false ]] || die "--shift-step may only be specified once"
       SHIFT_STEP=true
@@ -445,7 +479,10 @@ else
       a) CLI_AREA="$OPTARG"; AREA_SET=true ;;
       i) CLI_INVERT=true; INVERT_SET=true ;;
       o) CLI_OFF_PIXELS="$OPTARG"; OFF_PIXELS_SET=true ;;
-      s) SHIFT=true ;;
+      s)
+        [[ "$STEP_ALL" == false ]] || die "-s may only be specified once"
+        STEP_ALL=true
+        ;;
       m) CLI_MONITOR="$OPTARG"; MONITOR_SET=true ;;
       h) show_help; exit 0 ;;
       :) die "option -$OPTARG requires an argument" ;;
@@ -456,18 +493,25 @@ else
   [[ $# -eq 0 ]] || die "unexpected argument: $1"
 fi
 
-if [[ "$RESTORE_REQUESTED" == true && ( "$MASK_SET" == true || "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$OFF_PIXELS_SET" == true || "$SHIFT" == true || "$AREA_SET" == true || "$INVERT_SET" == true || "$MONITOR_SET" == true ) ]]; then
+if [[ "$RESTORE_REQUESTED" == true && ( "$MASK_SET" == true || "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$OFF_PIXELS_SET" == true || "$MASK_STEP" == true || "$STEP_ALL" == true || "$SHIFT_STEP" == true || "$AREA_SET" == true || "$INVERT_SET" == true || "$MONITOR_SET" == true ) ]]; then
   die "--restore cannot be combined with other options"
 fi
 
+if [[ "$ACTION" != "enable" && ( "$RESTORE_REQUESTED" == true || "$MASK_SET" == true || "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$OFF_PIXELS_SET" == true || "$MASK_STEP" == true || "$STEP_ALL" == true || "$SHIFT_STEP" == true ) ]]; then
+  die "'$ACTION' does not accept effect options"
+fi
+
 if [[ "$ACTION" == "enable" ]]; then
-  if [[ "$SHIFT" == true && ( "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$SHIFT_STEP" == true || "$MASK_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true ) ]]; then
-    die "-s cannot be combined with Pixel Shift options"
+  if [[ "$STEP_ALL" == true && ( "$MASK_STEP" == true || "$SHIFT_STEP" == true || "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$MASK_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$OFF_PIXELS_SET" == true ) ]]; then
+    die "-s cannot be combined with other options"
   fi
-  if [[ "$SHIFT" == true && "$OFF_PIXELS_SET" == true ]]; then
-    die "-o cannot be combined with -s; change the pixel count without -s so brightness compensation can be recalculated"
+  if [[ "$MASK_STEP" == true && ( "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$SHIFT_STEP" == true || "$MASK_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true ) ]]; then
+    die "--mask-step cannot be combined with Pixel Shift, mask, or brightness options"
   fi
-  if [[ "$SHIFT_STEP" == true && ( "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$MASK_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$AREA_SET" == true || "$INVERT_SET" == true || "$OFF_PIXELS_SET" == true || "$MONITOR_SET" == true || "$SHIFT" == true ) ]]; then
+  if [[ "$MASK_STEP" == true && "$OFF_PIXELS_SET" == true ]]; then
+    die "--mask-step cannot be combined with -o or --disabled-pixels"
+  fi
+  if [[ "$SHIFT_STEP" == true && ( "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true || "$MASK_SET" == true || "$BRIGHTNESS_COMPENSATION_SET" == true || "$AREA_SET" == true || "$INVERT_SET" == true || "$OFF_PIXELS_SET" == true || "$MONITOR_SET" == true || "$MASK_STEP" == true || "$STEP_ALL" == true ) ]]; then
     die "--shift-step cannot be combined with other options"
   fi
   if [[ "$SHIFT_MODE_SET" == true ]]; then
@@ -1153,12 +1197,30 @@ if [[ "$SHIFT_STEP" == true ]]; then
     die "invalid Pixel Shift mode in state"
   }
   SHADER_ONLY=true
+elif [[ "$STEP_ALL" == true ]]; then
+  load_config
+  load_preferences
+  [[ -f "$STATE_FILE" ]] || die "cannot advance effects before enabling them"
+  load_state
+  [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
+  [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
+  [[ "$INVERT_SET" == false ]] || INVERT=true
+  [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
+
+  advance_active_effects || {
+    step_status=$?
+    if (( step_status == 2 )); then
+      die "no dynamic effect is available to advance"
+    fi
+    die "invalid Pixel Shift mode in state"
+  }
+  SHADER_ONLY=true
 else
   load_config
   load_preferences
 
-  if [[ "$SHIFT" == true && "$PIXEL_SHIFT_SET" == true ]]; then
-    die "-s cannot be combined with Pixel Shift options"
+  if [[ "$MASK_STEP" == true && "$PIXEL_SHIFT_SET" == true ]]; then
+    die "--mask-step cannot be combined with Pixel Shift options"
   fi
 
   if [[ "$PIXEL_SHIFT_SET" == true && "$CLI_PIXEL_SHIFT" == false && ! -f "$STATE_FILE" ]]; then
@@ -1174,13 +1236,13 @@ else
     fi
   fi
 
-  if [[ "$SHIFT" == true ]]; then
+  if [[ "$MASK_STEP" == true ]]; then
     [[ -f "$STATE_FILE" ]] || die "cannot use -s before enabling the mask"
     load_state
     [[ "$STATUS" == "active" ]] || die "hyproled is not active; run 'hyproled off' to recover first"
     MASK_WAS_ENABLED="$MASK_ENABLED"
-    [[ "$MASK_ENABLED" == true ]] || die "-s requires the mask to be active"
-    [[ "$OFF_PIXELS_SET" == false ]] || die "-o cannot be combined with -s"
+    [[ "$MASK_ENABLED" == true ]] || die "--mask-step requires the mask to be active"
+    [[ "$OFF_PIXELS_SET" == false ]] || die "--mask-step cannot be combined with -o"
     [[ "$AREA_SET" == false ]] || AREA="$CLI_AREA"
     [[ "$INVERT_SET" == false ]] || INVERT=true
     [[ "$MONITOR_SET" == false ]] || MONITOR="$CLI_MONITOR"
@@ -1242,7 +1304,7 @@ else
 
   # Pixel Shift-only changes must not recalculate brightness compensation.
   if [[ -f "$STATE_FILE" &&
-        "$SHIFT" != true &&
+        "$MASK_STEP" != true &&
         ( "$PIXEL_SHIFT_SET" == true || "$SHIFT_MODE_SET" == true ) &&
         "$AREA_SET" == false &&
         "$INVERT_SET" == false &&
@@ -1281,7 +1343,7 @@ if [[ -f "$STATE_FILE" ]]; then
     BRIGHTNESS_MAX="$current_max"
     BRIGHTNESS_APPLIED="$current_brightness"
   elif [[ "$MASK_ENABLED" == true &&
-          "$SHIFT" != true &&
+          "$MASK_STEP" != true &&
           "$SHADER_ONLY" != true ]]; then
     current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
     current_max=$(get_brightness_max) || die "cannot read maximum brightness from '$BRIGHTNESS_DEVICE'"
@@ -1355,7 +1417,7 @@ elif [[ "$MASK_ENABLED" == false ]]; then
   # No brightness access or writes in Pixel Shift-only mode.
   requested_brightness=0
   ROLLBACK_BRIGHTNESS=0
-elif [[ "$SHIFT" == true || "$SHADER_ONLY" == true ]]; then
+elif [[ "$MASK_STEP" == true || "$SHADER_ONLY" == true ]]; then
   current_brightness=$(get_brightness) || die "cannot read brightness from '$BRIGHTNESS_DEVICE'"
   requested_brightness="$current_brightness"
   ROLLBACK_BRIGHTNESS="$current_brightness"
@@ -1392,7 +1454,7 @@ ACTIVE_SHADER="$NEW_SHADER"
 STATUS="applying"
 RESTORE_TARGET=""
 if [[ "$MASK_ENABLED" == true &&
-      "$SHIFT" != true &&
+      "$MASK_STEP" != true &&
       "$SHADER_ONLY" != true ]]; then
   BRIGHTNESS_APPLIED="$requested_brightness"
 fi
@@ -1406,7 +1468,7 @@ if [[ "$BRIGHTNESS_RESTORE_REQUESTED" == true ]]; then
   BRIGHTNESS_ORIGINAL="$actual_brightness"
   BRIGHTNESS_APPLIED="$actual_brightness"
 elif [[ "$MASK_ENABLED" == true &&
-      "$SHIFT" != true &&
+      "$MASK_STEP" != true &&
       "$SHADER_ONLY" != true &&
       "$BRIGHTNESS_ENABLED" == true ]]; then
   BRIGHTNESS_WRITE_ATTEMPTED=true
@@ -1426,7 +1488,25 @@ fi
 
 notify_waybar
 
-if [[ "$SHIFT_STEP" == true ]]; then
+if [[ "$STEP_ALL" == true ]]; then
+  mask_step_status="disabled"
+  pixel_shift_step_status="disabled"
+
+  if [[ "$MASK_ENABLED" == true ]]; then
+    mask_step_status="phase $PHASE"
+  fi
+
+  if [[ "$PIXEL_SHIFT" == true ]]; then
+    if [[ "$PIXEL_SHIFT_MODE" == "fixed" ]]; then
+      pixel_shift_step_status="fixed (unchanged)"
+    else
+      pixel_shift_step_status="position $((PIXEL_SHIFT_INDEX + 1))/$(pixel_shift_mode_count "$PIXEL_SHIFT_MODE") ($PIXEL_SHIFT_MODE)"
+    fi
+  fi
+
+  printf 'hyproled: active effects advanced; mask %s; Pixel Shift %s\n' \
+    "$mask_step_status" "$pixel_shift_step_status"
+elif [[ "$SHIFT_STEP" == true ]]; then
   printf 'hyproled: Pixel Shift advanced to position %s/%s (%s)\n' \
     "$((PIXEL_SHIFT_INDEX + 1))" "$(pixel_shift_mode_count "$PIXEL_SHIFT_MODE")" "$PIXEL_SHIFT_MODE"
 elif [[ "$SHADER_ONLY" == true ]]; then
@@ -1438,7 +1518,7 @@ elif [[ "$SHADER_ONLY" == true ]]; then
 
   printf 'hyproled: pixel shift %s; brightness unchanged (%s)\n' \
     "$pixel_shift_status" "$ROLLBACK_BRIGHTNESS"
-elif [[ "$SHIFT" == true ]]; then
+elif [[ "$MASK_STEP" == true ]]; then
   printf 'hyproled: mask advanced to phase %s; brightness unchanged (%s)\n' "$PHASE" "$(get_brightness)"
 elif [[ "$MASK_ENABLED" == false ]]; then
   printf 'hyproled: Pixel Shift enabled; mask disabled; brightness unchanged\n'

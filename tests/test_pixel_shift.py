@@ -26,12 +26,12 @@ class CompositeShaderTests(unittest.TestCase):
             raise AssertionError("make_shader() was not found")
         cls.function = match.group(0)
 
-    def generate(self, mask, shift, path, dx=1, dy=0):
+    def generate(self, mask, shift, path, dx=1, dy=0, phase=0, off_pixels=1):
         script = (
             self.function
             + "\nMONITOR=0\n"
-            + "PHASE=0\n"
-            + "OFF_PIXELS=1\n"
+            + f"PHASE={phase}\n"
+            + f"OFF_PIXELS={off_pixels}\n"
             + f"MASK_ENABLED={'true' if mask else 'false'}\n"
             + f"PIXEL_SHIFT={'true' if shift else 'false'}\n"
             + f"PIXEL_SHIFT_DX={dx}\n"
@@ -82,6 +82,58 @@ class CompositeShaderTests(unittest.TestCase):
         self.assertIn("texelFetch(tex, sourceTexel, 0)", shader)
         self.assertIn("bool off =", shader)
 
+    def test_all_mask_phases_and_pixel_shift_positions_generate(self):
+        modes = {
+            "fixed": [(1, 0)],
+            "linear-horizontal": [(0, 0), (1, 0)],
+            "linear-vertical": [(0, 0), (0, 1)],
+            "orbit-2x2": [(0, 0), (1, 0), (1, 1), (0, 1)],
+            "orbit-3x3": [
+                (0, 0), (1, 0), (1, 1), (0, 1), (-1, 1),
+                (-1, 0), (-1, -1), (0, -1), (1, -1),
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            for phase in range(4):
+                for off_pixels in range(1, 4):
+                    for mode, offsets in modes.items():
+                        for index, (dx, dy) in enumerate(offsets):
+                            with self.subTest(
+                                phase=phase,
+                                off_pixels=off_pixels,
+                                mode=mode,
+                                index=index,
+                            ):
+                                path = Path(directory) / (
+                                    f"{mode}-{index}-phase-{phase}-pixels-{off_pixels}.frag"
+                                )
+                                shader = self.generate(
+                                    True,
+                                    True,
+                                    path,
+                                    dx=dx,
+                                    dy=dy,
+                                    phase=phase,
+                                    off_pixels=off_pixels,
+                                )
+
+                                self.assertIn(
+                                    f"mod(pos - float({phase}), 4.0) < float({off_pixels});",
+                                    shader,
+                                )
+                                if dx == 0 and dy == 0:
+                                    self.assertIn(
+                                        "vec4 orig = texture(tex, v_texcoord);",
+                                        shader,
+                                    )
+                                    self.assertNotIn("texelFetch", shader)
+                                else:
+                                    self.assertIn(
+                                        f"ivec2 sourceTexel = texel - ivec2({dx}, {dy});",
+                                        shader,
+                                    )
+
     def test_mask_uses_output_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:
             shader = self.generate(
@@ -126,6 +178,7 @@ class CompositeShaderTests(unittest.TestCase):
         self.assertIn("--pixel-shift", result.stdout)
         self.assertIn("--no-pixel-shift", result.stdout)
         self.assertIn("--pixel-shift-mode", result.stdout)
+        self.assertIn("--mask-step", result.stdout)
         self.assertIn("--shift-step", result.stdout)
 
         # The parser must preserve ordinary options after consuming a mode value.
@@ -138,10 +191,29 @@ class CompositeShaderTests(unittest.TestCase):
 
         invalid = subprocess.run(
             ["bash", str(HYPROLED), "--pixel-shift-mode", "unknown"],
-            cwd=ROOT, text=True, capture_output=True,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
         )
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("invalid Pixel Shift mode", invalid.stderr)
+
+        conflicting_steps = [
+            ["-s", "--shift-step"],
+            ["-s", "--mask-step"],
+            ["--mask-step", "--shift-step"],
+            ["--mask-step", "--pixel-shift"],
+            ["--status", "--mask-step"],
+        ]
+        for arguments in conflicting_steps:
+            with self.subTest(arguments=arguments):
+                conflict = subprocess.run(
+                    ["bash", str(HYPROLED), *arguments],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(conflict.returncode, 0)
 
     def test_all_pixel_shift_positions_compile(self):
         validator = shutil.which("glslangValidator")
@@ -190,7 +262,8 @@ class PixelShiftModeTests(unittest.TestCase):
     def setUpClass(cls):
         functions = []
         for name in ("pixel_shift_mode_count", "pixel_shift_position",
-                     "select_pixel_shift_mode", "advance_pixel_shift"):
+                     "select_pixel_shift_mode", "advance_pixel_shift",
+                     "advance_active_effects"):
             match = re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}", SOURCE)
             if match is None:
                 raise AssertionError(f"{name}() was not found")
@@ -256,6 +329,69 @@ class PixelShiftModeTests(unittest.TestCase):
             cwd=ROOT, text=True, capture_output=True,
         )
         self.assertEqual(fixed.returncode, 2)
+
+    def test_advance_active_effects(self):
+        cases = [
+            (
+                "MASK_ENABLED=true PIXEL_SHIFT=false PHASE=3 PIXEL_SHIFT_MODE=orbit-2x2 PIXEL_SHIFT_INDEX=0",
+                "0 0 0",
+                "mask only",
+            ),
+            (
+                "MASK_ENABLED=false PIXEL_SHIFT=true PHASE=2 PIXEL_SHIFT_MODE=orbit-3x3 PIXEL_SHIFT_INDEX=8",
+                "2 0 0",
+                "Pixel Shift only",
+            ),
+            (
+                "MASK_ENABLED=true PIXEL_SHIFT=true PHASE=3 PIXEL_SHIFT_MODE=orbit-2x2 PIXEL_SHIFT_INDEX=3",
+                "0 0 0",
+                "combined effects",
+            ),
+            (
+                "MASK_ENABLED=true PIXEL_SHIFT=true PHASE=2 PIXEL_SHIFT_MODE=fixed PIXEL_SHIFT_INDEX=0",
+                "3 0 0",
+                "fixed plus mask",
+            ),
+            (
+                "MASK_ENABLED=false PIXEL_SHIFT=true PHASE=2 PIXEL_SHIFT_MODE=fixed PIXEL_SHIFT_INDEX=0",
+                "2 0 2",
+                "fixed only",
+            ),
+        ]
+
+        for initial_state, expected, label in cases:
+            with self.subTest(case=label):
+                script = (
+                    self.functions
+                    + "\n" + initial_state + "\n"
+                    + "status=0\n"
+                    + "advance_active_effects || status=$?\n"
+                    + 'printf "%s %s %s\\n" "$PHASE" "$PIXEL_SHIFT_INDEX" "$status"\n'
+                )
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_advance_active_effects_does_not_partially_mutate_on_invalid_mode(self):
+        script = (
+            self.functions
+            + "\nMASK_ENABLED=true PIXEL_SHIFT=true PHASE=3 PIXEL_SHIFT_MODE=invalid PIXEL_SHIFT_INDEX=2\n"
+            + "status=0\nadvance_active_effects || status=$?\n"
+            + 'printf "%s %s %s\\n" "$PHASE" "$PIXEL_SHIFT_INDEX" "$status"\n'
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "3 2 1")
 
     def test_invalid_mode_position_is_rejected(self):
         result = subprocess.run(
@@ -531,7 +667,8 @@ class RuntimeStateLoadingTests(unittest.TestCase):
                 'PIXEL_SHIFT_MODE="orbit-3x3" PIXEL_SHIFT_INDEX=6\n'
                 'PHASE=0 OFF_PIXELS=1 MONITOR=0 INVERT=false MASK_ENABLED=false PIXEL_SHIFT=true\n'
                 'BRIGHTNESS_ORIGINAL=0 BRIGHTNESS_MAX=1 BRIGHTNESS_APPLIED=0\n'
-                'COMPENSATION_PERCENT=0 BRIGHTNESS_ENABLED=false COMPENSATION_MAP="{}"\n'
+                'COMPENSATION_PERCENT=0 BRIGHTNESS_ENABLED=false BRIGHTNESS_COMPENSATION_ENABLED=false COMPENSATION_MAP="{}"\n'
+                + 'save_preferences() { return 0; }\n'
                 + self.save_state_function
                 + '\nsave_state && cat "$STATE_FILE"\n'
             )
