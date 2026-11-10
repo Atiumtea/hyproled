@@ -1,0 +1,67 @@
+
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Tests and checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            jq \
+            glslang-tools
+
+      - name: Verify test tools
+        run: |
+          command -v bash
+          command -v python3
+          command -v jq
+          command -v glslangValidator
+
+      - name: Check Bash syntax
+        run: |
+          bash -n ./hyproled
+
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find ./examples -type f -name '*.sh' -print0)
+
+      - name: Verify executable mode
+        run: |
+          test -x ./hyproled
+
+          mode="$(git ls-files --stage -- hyproled | awk 'NR == 1 { print $1 }')"
+
+          if [[ "$mode" != "100755" ]]; then
+            echo "::error::hyproled must be committed with mode 100755 (found: ${mode:-missing})"
+            exit 1
+          fi
+
+      - name: Verify generated icons
+        run: python3 scripts/generate-icons.py --check
+
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -v
