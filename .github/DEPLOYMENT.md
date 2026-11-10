@@ -1,105 +1,36 @@
-# Deployment Guide
 
-This repository includes a GitHub Actions workflow for automated deployment to AUR and creating GitHub releases.
+# Deployment Status
 
-## Workflow: Deploy to AUR and Create Release
+Automated deployment is currently disabled.
 
-### Location
-`.github/workflows/deploy.yml`
+The previous deployment workflow has been archived at
+`../docs/archive/deploy.yml.disabled`.
 
-### Purpose
-This workflow automates the process of:
-1. Bumping the version in the `hyproled` script
-2. Creating a Git tag
-3. Creating a GitHub release
-4. Deploying the update to the AUR (Arch User Repository)
+It must not be re-enabled without a complete security and functionality
+review.
 
-### How to Use
+## Reasons for deactivation
 
-1. Go to the **Actions** tab in the GitHub repository
-2. Select the **Deploy to AUR and Create Release** workflow
-3. Click **Run workflow**
-4. Choose the version bump type:
-   - **patch**: Increment the patch version (e.g., X.Y.Z → X.Y.Z+1)
-   - **minor**: Increment the minor version (e.g., X.Y.Z → X.Y+1.0)
-   - **major**: Increment the major version (e.g., X.Y.Z → X+1.0.0)
-5. Click **Run workflow** to start the deployment
+- The workflow expects a `version: X.Y.Z` declaration, while the current
+  script uses `VERSION="0.4.0-dev"`.
+- It automatically creates and pushes commits and Git tags.
+- GitHub Release creation and AUR deployment are coupled in one job.
+- Repository-wide AUR SSH secrets are exposed at job scope.
+- The workflow sources an external AUR `PKGBUILD` while the SSH key and
+  agent are available in the same job.
+- The AUR host key is obtained dynamically using `ssh-keyscan`, without
+  an independently established trust anchor.
 
-### Required Secrets
+## Current Release Policy
 
-For the workflow to function properly, you need to configure the following secret in your GitHub repository:
+Releases remain maintainer-controlled.
 
-#### AUR_SSH_KEY
+Before publishing:
 
-This is the SSH private key used to authenticate with the AUR repository.
+1. Ensure that the intended commit passes CI.
+2. Update the application version when preparing a release.
+3. Commit and push the changes.
+4. Create and push the Git tag.
+5. Publish the GitHub Release manually.
 
-**Setup Instructions:**
-
-1. Generate an SSH key pair (if you don't have one):
-   ```bash
-   ssh-keygen -t ed25519 -C "your-email@example.com" -f ~/.ssh/aur
-   ```
-
-2. Add the public key to your AUR account:
-   - Log in to https://aur.archlinux.org
-   - Go to **My Account** → **SSH Public Keys**
-   - Add the contents of `~/.ssh/aur.pub`
-
-3. Add the private key as a GitHub secret:
-   - Go to your repository's **Settings** → **Secrets and variables** → **Actions**
-   - Click **New repository secret**
-   - Name: `AUR_SSH_KEY`
-   - Value: Paste the contents of `~/.ssh/aur` (the private key)
-
-### What the Workflow Does
-
-1. **Version Bump**: Updates the version number in the `hyproled` script based on your selection
-2. **Git Tag**: Creates and pushes a new Git tag (e.g., `vX.Y.Z`)
-3. **GitHub Release**: Creates a new GitHub release with:
-   - Release notes
-   - Installation instructions
-   - Links to AUR package
-4. **AUR Deployment**: 
-   - Clones the AUR repository
-   - Updates the `PKGBUILD` file (increments `pkgrel`)
-   - Updates `.SRCINFO`
-   - Pushes changes to AUR
-
-### Manual Deployment (Alternative)
-
-If you prefer to deploy manually:
-
-1. Update version in `hyproled`:
-   ```bash
-   # Example: update the version line in the script
-   sed -i 's/version: X.Y.Z/version: X.Y.ZNEW/' hyproled
-   git commit -am "Bump version to X.Y.ZNEW"
-   git tag -a vX.Y.ZNEW -m "Release vX.Y.ZNEW"
-   git push && git push --tags
-   ```
-
-2. Create GitHub release through the web interface
-
-3. Deploy to AUR:
-   ```bash
-   git clone ssh://aur@aur.archlinux.org/hyproled-git.git
-   cd hyproled-git
-   # Update PKGBUILD (increment pkgrel)
-   makepkg --printsrcinfo > .SRCINFO
-   git add PKGBUILD .SRCINFO
-   git commit -m "Update to version X.Y.ZNEW"
-   git push
-   ```
-
-### Troubleshooting
-
-- **Workflow fails at AUR deployment**: Make sure the `AUR_SSH_KEY` secret is correctly configured
-- **Version not updating**: Check that the version format in `hyproled` follows `version: X.Y.Z`
-- **Push fails**: Ensure the GitHub Actions bot has permission to push to the repository (this should be enabled by default)
-
-### Notes
-
-- The workflow uses `workflow_dispatch`, meaning it only runs when manually triggered
-- The AUR package is `hyproled-git`, which tracks the Git repository
-- For `-git` AUR packages, we increment `pkgrel` rather than changing `pkgver`
-- The workflow requires `makepkg` to be available for generating `.SRCINFO`
+Automated AUR deployment is not currently supported by this fork.
