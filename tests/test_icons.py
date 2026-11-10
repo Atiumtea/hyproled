@@ -32,11 +32,16 @@ def mask_from_positions(positions: set[int]) -> str:
 
 
 def shader_mask(phase: int, off_pixels: int) -> str:
-    disabled = {
-        pos
-        for pos in range(4)
-        if (pos - phase) % 4 < off_pixels
-    }
+    # Match gl_FragCoord pixel centres in the shader, not integer pixel corners.
+    disabled = set()
+    for pos in range(4):
+        x = pos % 2
+        y = pos // 2
+        fc_x = x + 0.5
+        fc_y = y + 0.5
+        shader_pos = (fc_x % 2.0) + 2.0 * (fc_y % 2.0)
+        if (shader_pos - phase) % 4.0 < off_pixels:
+            disabled.add(pos)
 
     return mask_from_positions(disabled)
 
@@ -66,10 +71,10 @@ class IconGenerationTests(unittest.TestCase):
 
     def test_exact_shader_table(self):
         expected = [
+            ["1000", "1001", "1011"],
             ["0001", "0011", "0111"],
             ["0010", "0110", "1110"],
             ["0100", "1100", "1101"],
-            ["1000", "1001", "1011"],
         ]
 
         actual = [

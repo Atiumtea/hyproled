@@ -283,7 +283,7 @@ emit_status() {
        elif $shift_mode == "orbit-2x2" then 4 else 9 end) as $shift_count
     | (
         [range(0; 4) as $pos
-         | if (($pos - $s.phase + 4) % 4) < $s.offPixels
+         | if (($pos - $s.phase + 5) % 4) < $s.offPixels
            then "1"
            else "0"
            end]
