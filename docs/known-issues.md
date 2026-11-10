@@ -62,13 +62,14 @@ Running multiple independent applications that modify the screen shader is there
 
 ## 3. Waybar status icon coverage
 
-Status: Known limitation Affected component: Optional Waybar integration
+**Status:** Hardware-dependent limitation  
+**Affected component:** Optional Waybar integration
 
-The existing SVG icon set represents the 2x2 pixel mask and its phases.
+The generated SVG set covers all 12 mask patterns combined with nine Pixel Shift direction states, as well as all nine Pixel Shift-only states.
 
-It does not yet provide complete visual representation of all runtime effect combinations, particularly Pixel Shift-only operation.
+The direction indicator is derived from the actual production `(dx,dy)` vector. Its physical N/NE/E/SE/S/SW/W/NW mapping has been verified on the ThinkPad X1 Extreme Gen 2 OLED panel. Other displays or compositor configurations may require separate orientation validation.
 
-The textual status and tooltip provide additional information and should be used when the icon alone does not accurately describe the active effects.
+The icon shows the current state only; it does not communicate scheduling history or elapsed dwell time.
 
 ## 4. Brightness compensation calibration
 

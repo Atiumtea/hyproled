@@ -262,7 +262,7 @@ class PixelShiftModeTests(unittest.TestCase):
     def setUpClass(cls):
         functions = []
         for name in ("pixel_shift_mode_count", "pixel_shift_position",
-                     "select_pixel_shift_mode", "advance_pixel_shift",
+                     "pixel_shift_direction", "select_pixel_shift_mode", "advance_pixel_shift",
                      "advance_active_effects"):
             match = re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}", SOURCE)
             if match is None:
@@ -299,6 +299,25 @@ class PixelShiftModeTests(unittest.TestCase):
                     f'pixel_shift_position "{mode}" "{index}"'
                 ).split()))
                 self.assertEqual(actual, offset, f"{mode}[{index}]")
+
+    def test_direction_mapping_uses_the_actual_physical_vector(self):
+        expected = {
+            "fixed": ["east"],
+            "linear-horizontal": ["center", "east"],
+            "linear-vertical": ["center", "south"],
+            "orbit-2x2": ["center", "east", "south-east", "south"],
+            "orbit-3x3": [
+                "center", "east", "south-east", "south", "south-west",
+                "west", "north-west", "north", "north-east",
+            ],
+        }
+
+        for mode, directions in expected.items():
+            for index, direction in enumerate(directions):
+                actual = self.run_bash(
+                    f'pixel_shift_direction "{mode}" "{index}"'
+                )
+                self.assertEqual(actual, direction, f"{mode}[{index}]")
 
     def test_new_sessions_default_to_orbit_2x2(self):
         self.assertRegex(SOURCE, r'(?m)^PIXEL_SHIFT_MODE="orbit-2x2"$')
@@ -638,6 +657,8 @@ class RuntimeStatusTests(unittest.TestCase):
             payload = self.run_status(state, directory)
 
         self.assertIn("pixel-shift-enabled", payload["class"])
+        self.assertIn("pixel-shift-only", payload["class"])
+        self.assertIn("pixel-shift-direction-east", payload["class"])
         self.assertFalse(
             any(class_name.startswith("mask-") for class_name in payload["class"])
         )
@@ -661,6 +682,7 @@ class RuntimeStatusTests(unittest.TestCase):
 
         self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-enabled", payload["class"])
+        self.assertIn("pixel-shift-direction-east", payload["class"])
         self.assert_brightness_disabled(payload)
 
     def test_v5_orbit_3x3_position(self):
@@ -669,6 +691,7 @@ class RuntimeStatusTests(unittest.TestCase):
             payload = self.run_status(state, directory)
 
         self.assertIn("pixel-shift-mode-orbit-3x3", payload["class"])
+        self.assertIn("pixel-shift-direction-north-east", payload["class"])
         self.assertIn("Pixel Shift mode: orbit-3x3", payload["tooltip"])
         self.assertIn("Pixel Shift position: 9/9", payload["tooltip"])
 

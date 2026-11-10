@@ -84,28 +84,35 @@ class IconGenerationTests(unittest.TestCase):
 
         self.assertEqual(actual, expected)
 
-    def test_exact_12_shader_masks_are_generated(self):
-        expected = {
+    def test_all_119_icons_are_generated(self):
+        masks = {
             shader_mask(phase, count)
             for phase in range(4)
             for count in (1, 2, 3)
         }
+        directions = (
+            "center", "north", "north-east", "east", "south-east",
+            "south", "south-west", "west", "north-west",
+        )
 
-        self.assertEqual(len(expected), 12)
+        self.assertEqual(len(masks), 12)
+        expected = {"hyproled-off", "hyproled-error"}
+        expected.update(
+            f"hyproled-mask-{mask}-shift-{direction}"
+            for mask in masks
+            for direction in directions
+        )
+        expected.update(f"hyproled-shift-{direction}" for direction in directions)
 
-        actual = {
-            path.stem.removeprefix("hyproled-")
-            for path in ICONS.glob("hyproled-*.svg")
-            if path.stem not in ("hyproled-off", "hyproled-error")
-        }
-
+        actual = {path.stem for path in ICONS.glob("hyproled-*.svg")}
+        self.assertEqual(len(expected), 119)
         self.assertEqual(actual, expected)
 
     def test_each_svg_sector_matches_its_glsl_position(self):
         for phase in range(4):
             for count in (1, 2, 3):
                 mask = shader_mask(phase, count)
-                root = read_svg(f"hyproled-{mask}.svg")
+                root = read_svg(f"hyproled-mask-{mask}-shift-center.svg")
 
                 self.assertEqual(
                     root.attrib.get("viewBox"),
@@ -122,6 +129,12 @@ class IconGenerationTests(unittest.TestCase):
                 self.assertIn("outer-ring", paths)
                 self.assertIn("grid-vertical", paths)
                 self.assertIn("grid-horizontal", paths)
+                for direction in (
+                    "north", "north-east", "east", "south-east",
+                    "south", "south-west", "west", "north-west",
+                ):
+                    self.assertIn(f"direction-{direction}", paths)
+                    self.assertEqual(paths[f"direction-{direction}"].attrib["opacity"], "0.08")
 
                 for element in paths.values():
                     self.assertEqual(
@@ -144,6 +157,30 @@ class IconGenerationTests(unittest.TestCase):
                             path.attrib["d"].startswith(expected_prefix),
                             (mask, pos, path.attrib["d"]),
                         )
+
+    def test_directional_and_shift_only_icons(self):
+        directions = (
+            "center", "north", "north-east", "east", "south-east",
+            "south", "south-west", "west", "north-west",
+        )
+        compass = directions[1:]
+
+        for selected in directions:
+            root = read_svg(f"hyproled-shift-{selected}.svg")
+            elements = {element.attrib.get("id"): element for element in root.iter()}
+            self.assertIn("shift-center", elements)
+            self.assertNotIn("grid-vertical", elements)
+            self.assertNotIn("grid-horizontal", elements)
+
+            for direction in compass:
+                path = elements[f"direction-{direction}"]
+                expected_opacity = "1" if direction == selected else "0.08"
+                self.assertEqual(path.attrib["opacity"], expected_opacity)
+
+        combined = read_svg("hyproled-mask-1000-shift-south-east.svg")
+        combined_ids = {element.attrib.get("id") for element in combined.iter()}
+        self.assertIn("pixel-3", combined_ids)
+        self.assertNotIn("shift-center", combined_ids)
 
     def test_off_and_error_icons(self):
         off_root = read_svg("hyproled-off.svg")
@@ -262,8 +299,9 @@ class StatusMaskTests(unittest.TestCase):
                         payload["class"],
                     )
 
+                    self.assertIn("pixel-shift-direction-center", payload["class"])
                     self.assertTrue(
-                        (ICONS / f"hyproled-{expected_mask}.svg").is_file()
+                        (ICONS / f"hyproled-mask-{expected_mask}-shift-center.svg").is_file()
                     )
 
 

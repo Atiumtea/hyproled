@@ -83,6 +83,25 @@ pixel_shift_position() {
   esac
 }
 
+pixel_shift_direction() {
+  local position dx dy
+  position=$(pixel_shift_position "$1" "$2") || return 1
+  IFS=' ' read -r dx dy <<< "$position"
+
+  case "$dx:$dy" in
+    0:0) printf 'center\n' ;;
+    0:-1) printf 'north\n' ;;
+    1:-1) printf 'north-east\n' ;;
+    1:0) printf 'east\n' ;;
+    1:1) printf 'south-east\n' ;;
+    0:1) printf 'south\n' ;;
+    -1:1) printf 'south-west\n' ;;
+    -1:0) printf 'west\n' ;;
+    -1:-1) printf 'north-west\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 select_pixel_shift_mode() {
   local requested_mode="$1"
   pixel_shift_mode_count "$requested_mode" >/dev/null || return 1
@@ -205,6 +224,7 @@ need_command() { command -v "$1" >/dev/null 2>&1 || die "required command not fo
 
 emit_status() {
   local invalid_tooltip="Hyproled: invalid or unsupported state file"
+  local shift_state shift_mode shift_index shift_direction
 
   # No state file means the utility is currently disabled.
   if [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
@@ -269,7 +289,28 @@ emit_status() {
     return 0
   fi
 
-  jq -c '
+  # Resolve the actual output direction through the production position table.
+  # Disabled Pixel Shift always maps to the neutral center state, regardless
+  # of the mode retained in persistent preferences.
+  shift_state=$(jq -r '
+    if (.pixelShift // false) then
+      (if .version >= 5 then .pixelShiftMode else "fixed" end) as $mode
+      | (if .version >= 5 then .pixelShiftIndex else 0 end) as $index
+      | "\($mode)\t\($index)"
+    else
+      "orbit-2x2\t0"
+    end
+  ' "$STATE_FILE") || {
+    jq -cn --arg tooltip "$invalid_tooltip" '{text: "◌", alt: "error", tooltip: $tooltip, class: ["error"]}'
+    return 0
+  }
+  IFS=$'\t' read -r shift_mode shift_index <<< "$shift_state"
+  shift_direction=$(pixel_shift_direction "$shift_mode" "$shift_index") || {
+    jq -cn --arg tooltip "$invalid_tooltip" '{text: "◌", alt: "error", tooltip: $tooltip, class: ["error"]}'
+    return 0
+  }
+
+  jq --arg shift_direction "$shift_direction" -c '
     . as $s
     | (if $s.version >= 2 then $s.brightnessEnabled else true end) as $brightness_enabled
     | (if $s.version >= 4 then $s.maskEnabled else true end) as $mask_enabled
@@ -312,6 +353,7 @@ emit_status() {
             (if ($s.pixelShift // false) then "enabled" else "disabled" end) +
           "\nPixel Shift mode: " + $shift_mode +
           "\nPixel Shift position: " + (($shift_index + 1) | tostring) + "/" + ($shift_count | tostring) +
+          "\nPixel Shift direction: " + $shift_direction +
           "\nBrightness compensation: " +
             (if $brightness_preference then "enabled" else "disabled" end) +
           (if $brightness_enabled then
@@ -343,6 +385,13 @@ emit_status() {
                 (if ($s.pixelShift // false) then "enabled" else "disabled" end)),
               ("pixel-shift-mode-" + $shift_mode),
               ("pixel-shift-position-" + ($shift_index | tostring)),
+              ("pixel-shift-direction-" + $shift_direction)
+            ] +
+            (if (not $mask_enabled) and ($s.pixelShift // false)
+             then ["pixel-shift-only"]
+             else []
+             end) +
+            [
               (if $brightness_enabled
                then "brightness-enabled"
                else "brightness-disabled"
