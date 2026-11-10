@@ -83,3 +83,33 @@ These values are not direct measurements of physical display luminance and canno
 The compensation percentages are configurable heuristics, not photometrically calibrated values for individual OLED panels.
 
 Actual luminance preservation and any reduction in differential OLED aging have not been established through measurements.
+
+## 5. Effectiveness model limitations
+
+**Status:** Known limitation  
+**Affected component:** Image-based effectiveness tests  
+**Platform:** CPU-side simulation and synthetic grayscale fixtures
+
+The image-based tests evaluate the spatial distribution of normalized grayscale input signal across Pixel Shift and mask states. They are useful for comparing algorithmic behavior and detecting regressions, but they are not a physical OLED aging model.
+
+The tests obtain Pixel Shift offsets and combined phase/index transitions from the production Bash functions. However, image sampling and exposure accumulation are performed by a separate Python CPU model. The production GLSL is checked for expected expressions, but the shader is not executed on a GPU.
+
+### Scope and limitations
+
+- The fixtures are nine small synthetic grayscale PGM images. They cover selected geometric patterns and UI-like content, but are not a representative sample of desktop workloads or a substitute for testing on the actual 3840×2160 panel.
+- The model evaluates integer texel translation, the current black out-of-bounds behavior, and the mask formula. It does not model area/invert clipping or the optional brightness-compensation setting.
+- RGB subpixel structure, subpixel current, electrical charge, calibrated luminance, gamma/transfer characteristics, temperature, automatic brightness limiting, panel compensation circuitry, and OLED degradation chemistry are not represented.
+- Edge-loss measurements are affected by the deliberately small fixture dimensions and must not be directly extrapolated to the full panel.
+- Metrics such as peak exposure, effective pixels, support, and energy retention describe simulated signal distribution. They are not calibrated burn-in scores or measurements of OLED lifetime improvement.
+
+## 6. Pixel Shift scheduling interval validation
+
+**Status:** Not empirically validated  
+**Affected component:** Automatic Pixel Shift scheduler  
+**Platform:** systemd user timer
+
+The effectiveness model assigns equal dwell time to every scheduled state and evaluates complete state cycles. It does not model the temporal behavior of OLED degradation or determine how the actual interval between state transitions affects panel aging.
+
+Consequently, the model cannot establish an optimal timer interval or quantify the effect of changing it. The current 15-minute interval is an operational configuration, not an experimentally established optimum for the ThinkPad OLED panel or OLED displays in general.
+
+No interval recommendation should be treated as a conclusion of the current effectiveness tests.
