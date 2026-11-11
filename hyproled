@@ -295,7 +295,7 @@ emit_status() {
   shift_state=$(jq -r '
     if (.pixelShift // false) then
       (if .version >= 5 then .pixelShiftMode else "fixed" end) as $mode
-      | (if .version >= 5 then .pixelShiftIndex else 0 end) as $index
+      | (if .version >= 5 then (.pixelShiftIndex | floor) else 0 end) as $index
       | "\($mode)\t\($index)"
     else
       "orbit-2x2\t0"
@@ -317,7 +317,7 @@ emit_status() {
     | (if $s.version >= 5 then $s.pixelShiftMode
        elif ($s.pixelShift // false) then "fixed"
        else "orbit-2x2" end) as $shift_mode
-    | (if $s.version >= 5 then $s.pixelShiftIndex else 0 end) as $shift_index
+    | (if $s.version >= 5 then ($s.pixelShiftIndex | floor) else 0 end) as $shift_index
     | (if $s.brightnessCompensationEnabled != null then $s.brightnessCompensationEnabled else $brightness_enabled end) as $brightness_preference
     | (if $shift_mode == "fixed" then 1
        elif $shift_mode == "linear-horizontal" or $shift_mode == "linear-vertical" then 2
@@ -387,7 +387,7 @@ emit_status() {
               ("pixel-shift-position-" + ($shift_index | tostring)),
               ("pixel-shift-direction-" + $shift_direction)
             ] +
-            (if (not $mask_enabled) and ($s.pixelShift // false)
+            (if ($mask_enabled == false) and ($s.pixelShift // false)
              then ["pixel-shift-only"]
              else []
              end) +

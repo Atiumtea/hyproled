@@ -62,12 +62,13 @@ Running multiple independent applications that modify the screen shader is there
 
 ## 3. Waybar status icon coverage
 
-**Status:** Hardware-dependent limitation  
+**Status:** Hardware-dependent limitation
+
 **Affected component:** Optional Waybar integration
 
 The generated SVG set covers all 12 mask patterns combined with nine Pixel Shift direction states, as well as all nine Pixel Shift-only states.
 
-The direction indicator is derived from the actual production `(dx,dy)` vector. Its physical N/NE/E/SE/S/SW/W/NW mapping has been verified on the ThinkPad X1 Extreme Gen 2 OLED panel. Other displays or compositor configurations may require separate orientation validation.
+The direction indicator is derived from the actual production `(dx,dy)` vector. The physical X/Y orientation was checked on the ThinkPad X1 Extreme Gen 2 OLED panel (+X moves the image right; +Y moves it down); the eight compass directions are derived from that mapping. Other displays or compositor configurations may require separate orientation validation.
 
 The icon shows the current state only; it does not communicate scheduling history or elapsed dwell time.
 

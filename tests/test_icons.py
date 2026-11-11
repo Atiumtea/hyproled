@@ -165,6 +165,32 @@ class IconGenerationTests(unittest.TestCase):
         )
         compass = directions[1:]
 
+        masks = {
+            shader_mask(phase, count)
+            for phase in range(4)
+            for count in (1, 2, 3)
+        }
+
+        for mask in masks:
+            for selected in directions:
+                root = read_svg(
+                    f"hyproled-mask-{mask}-shift-{selected}.svg"
+                )
+                paths = {
+                    element.attrib.get("id"): element
+                    for element in root.iter(f"{SVG_NS}path")
+                }
+
+                for direction in compass:
+                    expected_opacity = (
+                        "1" if direction == selected else "0.08"
+                    )
+                    self.assertEqual(
+                        paths[f"direction-{direction}"].attrib["opacity"],
+                        expected_opacity,
+                        (mask, selected, direction),
+                    )
+
         for selected in directions:
             root = read_svg(f"hyproled-shift-{selected}.svg")
             elements = {element.attrib.get("id"): element for element in root.iter()}

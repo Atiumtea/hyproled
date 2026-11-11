@@ -711,6 +711,26 @@ class RuntimeStatusTests(unittest.TestCase):
         self.assertIn("mask-1000", payload["class"])
         self.assertIn("pixel-shift-enabled", payload["class"])
 
+    def test_v5_integral_float_position_is_normalized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.create_state(5, True, True, "orbit-3x3", 8)
+            state["pixelShiftIndex"] = 8.0
+            payload = self.run_status(state, directory)
+
+        self.assertEqual(payload["alt"], "active")
+        self.assertIn("pixel-shift-direction-north-east", payload["class"])
+        self.assertIn("Pixel Shift position: 9/9", payload["tooltip"])
+
+    def test_v5_disabled_pixel_shift_uses_center_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.create_state(5, True, False, "orbit-3x3", 8)
+            payload = self.run_status(state, directory)
+
+        self.assertIn("pixel-shift-direction-center", payload["class"])
+        self.assertNotIn("pixel-shift-direction-north-east", payload["class"])
+        self.assertIn("Pixel Shift direction: center", payload["tooltip"])
+        self.assertIn("Pixel shift: disabled", payload["tooltip"])
+
     def test_v2_migration_defaults_to_mask_only(self):
         with tempfile.TemporaryDirectory() as directory:
             state = self.create_state(2)
