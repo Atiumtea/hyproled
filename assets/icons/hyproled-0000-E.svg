@@ -1,15 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
-  <g transform="translate(2 2)">
+  <g transform="translate(2.6 2.6) scale(0.95)">
   <path id="grid-vertical" class="success" d="M11.35 3 H12.65 V21 H11.35 Z" />
   <path id="grid-horizontal" class="success" d="M3 11.35 H21 V12.65 H3 Z" />
   <path id="outer-ring" class="success" fill-rule="evenodd" d="M12 1.5 A10.5 10.5 0 1 1 12 22.5 A10.5 10.5 0 1 1 12 1.5 Z M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 Z" />
   </g>
-  <path id="direction-north" class="success" opacity="0.30" d="M10.597 1.298 A13.15 13.15 0 0 1 17.403 1.298 L16.938 3.037 A11.35 11.35 0 0 0 11.062 3.037 Z" />
-  <path id="direction-north-east" class="success" opacity="0.30" d="M20.575 2.612 A13.15 13.15 0 0 1 25.388 7.425 L23.829 8.325 A11.35 11.35 0 0 0 19.675 4.171 Z" />
-  <path id="direction-east" class="success" opacity="1" d="M26.702 10.597 A13.15 13.15 0 0 1 26.702 17.403 L24.963 16.938 A11.35 11.35 0 0 0 24.963 11.062 Z" />
-  <path id="direction-south-east" class="success" opacity="0.30" d="M25.388 20.575 A13.15 13.15 0 0 1 20.575 25.388 L19.675 23.829 A11.35 11.35 0 0 0 23.829 19.675 Z" />
-  <path id="direction-south" class="success" opacity="0.30" d="M17.403 26.702 A13.15 13.15 0 0 1 10.597 26.702 L11.062 24.963 A11.35 11.35 0 0 0 16.938 24.963 Z" />
-  <path id="direction-south-west" class="success" opacity="0.30" d="M7.425 25.388 A13.15 13.15 0 0 1 2.612 20.575 L4.171 19.675 A11.35 11.35 0 0 0 8.325 23.829 Z" />
-  <path id="direction-west" class="success" opacity="0.30" d="M1.298 17.403 A13.15 13.15 0 0 1 1.298 10.597 L3.037 11.062 A11.35 11.35 0 0 0 3.037 16.938 Z" />
-  <path id="direction-north-west" class="success" opacity="0.30" d="M2.612 7.425 A13.15 13.15 0 0 1 7.425 2.612 L8.325 4.171 A11.35 11.35 0 0 0 4.171 8.325 Z" />
+  <path id="direction-east" class="success" d="M26.149 8.968 A13.15 13.15 0 0 1 26.149 19.032 L24.832 18.487 A11.725 11.725 0 0 0 24.832 9.513 Z" />
 </svg>

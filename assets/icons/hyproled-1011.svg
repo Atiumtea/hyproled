@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
-  <g transform="translate(2 2)">
+  <g transform="translate(2.6 2.6) scale(0.95)">
   <path id="pixel-0" class="success" d="M12 12 L12 21.2 A9.2 9.2 0 0 1 2.8 12 Z" />
   <path id="pixel-1" class="success" d="M12 12 L21.2 12 A9.2 9.2 0 0 1 12 21.2 Z" />
   <path id="pixel-3" class="success" d="M12 12 L12 2.8 A9.2 9.2 0 0 1 21.2 12 Z" />
