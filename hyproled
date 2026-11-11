@@ -370,10 +370,12 @@ emit_status() {
         ),
         class: (
           if $s.status == "active" then
-            ["active"] +
+            [
+              "active",
+              ("mask-" + (if $mask_enabled then $mask else "0000" end))
+            ] +
             (if $mask_enabled then
               [
-                ("mask-" + $mask),
                 ("pixels-" + ($s.offPixels | tostring)),
                 ("phase-" + ($s.phase | tostring))
               ]
@@ -387,10 +389,6 @@ emit_status() {
               ("pixel-shift-position-" + ($shift_index | tostring)),
               ("pixel-shift-direction-" + $shift_direction)
             ] +
-            (if ($mask_enabled == false) and ($s.pixelShift // false)
-             then ["pixel-shift-only"]
-             else []
-             end) +
             [
               (if $brightness_enabled
                then "brightness-enabled"

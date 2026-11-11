@@ -657,10 +657,11 @@ class RuntimeStatusTests(unittest.TestCase):
             payload = self.run_status(state, directory)
 
         self.assertIn("pixel-shift-enabled", payload["class"])
-        self.assertIn("pixel-shift-only", payload["class"])
         self.assertIn("pixel-shift-direction-east", payload["class"])
-        self.assertFalse(
-            any(class_name.startswith("mask-") for class_name in payload["class"])
+        self.assertIn("mask-0000", payload["class"])
+        self.assertEqual(
+            [name for name in payload["class"] if name.startswith("mask-")],
+            ["mask-0000"],
         )
         self.assertIn("Mask: disabled", payload["tooltip"])
         self.assertIn("Pixel shift: enabled", payload["tooltip"])

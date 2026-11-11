@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+  <g transform="translate(2 2)">
+  <path id="pixel-0" class="success" d="M12 12 L12 21.2 A9.2 9.2 0 0 1 2.8 12 Z" />
+  <path id="grid-vertical" class="success" d="M11.35 3 H12.65 V21 H11.35 Z" />
+  <path id="grid-horizontal" class="success" d="M3 11.35 H21 V12.65 H3 Z" />
+  <path id="outer-ring" class="success" fill-rule="evenodd" d="M12 1.5 A10.5 10.5 0 1 1 12 22.5 A10.5 10.5 0 1 1 12 1.5 Z M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 Z" />
+  </g>
+</svg>

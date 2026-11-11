@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,39 +12,53 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ICONS = ROOT / "assets" / "icons"
+ASSETS = ROOT / "assets"
+ICONS = ASSETS / "icons"
+CSS = ASSETS / "waybar-icons.css"
 HYPROLED = ROOT / "hyproled"
 GENERATOR = ROOT / "scripts" / "generate-icons.py"
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
-# Position-to-geometry mapping. This is deliberately independent
-# of the generator implementation.
+DIRECTION_CODES = {
+    "north": "N", "north-east": "NE", "east": "E",
+    "south-east": "SE", "south": "S", "south-west": "SW",
+    "west": "W", "north-west": "NW",
+}
+DIRECTIONS = tuple(DIRECTION_CODES)
 EXPECTED_SECTOR_PREFIX = {
-    0: "M12 12 L12 21.2",  # bottom-left, GLSL pos 0
-    1: "M12 12 L21.2 12",  # bottom-right, GLSL pos 1
-    2: "M12 12 L2.8 12",   # top-left, GLSL pos 2
-    3: "M12 12 L12 2.8",  # top-right, GLSL pos 3
+    0: "M12 12 L12 21.2",
+    1: "M12 12 L21.2 12",
+    2: "M12 12 L2.8 12",
+    3: "M12 12 L12 2.8",
 }
 
 
 def mask_from_positions(positions: set[int]) -> str:
-    bits = sum(1 << pos for pos in positions)
-    return f"{bits:04b}"
+    return f"{sum(1 << pos for pos in positions):04b}"
 
 
 def shader_mask(phase: int, off_pixels: int) -> str:
-    # Match gl_FragCoord pixel centres in the shader, not integer pixel corners.
     disabled = set()
     for pos in range(4):
-        x = pos % 2
-        y = pos // 2
-        fc_x = x + 0.5
-        fc_y = y + 0.5
+        x, y = pos % 2, pos // 2
+        fc_x, fc_y = x + 0.5, y + 0.5
         shader_pos = (fc_x % 2.0) + 2.0 * (fc_y % 2.0)
         if (shader_pos - phase) % 4.0 < off_pixels:
             disabled.add(pos)
-
     return mask_from_positions(disabled)
+
+
+def active_masks() -> set[str]:
+    return {
+        shader_mask(phase, count)
+        for phase in range(4)
+        for count in (1, 2, 3)
+    }
+
+
+def icon_name(mask: str, direction: str = "center") -> str:
+    suffix = "" if direction == "center" else f"-{DIRECTION_CODES[direction]}"
+    return f"hyproled-{mask}{suffix}.svg"
 
 
 def read_svg(name: str):
@@ -53,12 +68,10 @@ def read_svg(name: str):
 class IconGenerationTests(unittest.TestCase):
     def test_main_shader_formula_is_the_expected_source_of_truth(self):
         source = HYPROLED.read_text(encoding="utf-8")
-
         self.assertIn(
             "float pos = mod(fc.x, 2.0) + 2.0 * mod(fc.y, 2.0);",
             source,
         )
-
         self.assertIn(
             "bool off = mod(pos - float(${PHASE}), 4.0) < float(${OFF_PIXELS});",
             source,
@@ -76,173 +89,109 @@ class IconGenerationTests(unittest.TestCase):
             ["0010", "0110", "1110"],
             ["0100", "1100", "1101"],
         ]
-
         actual = [
             [shader_mask(phase, count) for count in (1, 2, 3)]
             for phase in range(4)
         ]
-
         self.assertEqual(actual, expected)
 
-    def test_all_119_icons_are_generated(self):
-        masks = {
-            shader_mask(phase, count)
-            for phase in range(4)
-            for count in (1, 2, 3)
-        }
-        directions = (
-            "center", "north", "north-east", "east", "south-east",
-            "south", "south-west", "west", "north-west",
-        )
-
-        self.assertEqual(len(masks), 12)
-        expected = {"hyproled-off", "hyproled-error"}
-        expected.update(
-            f"hyproled-mask-{mask}-shift-{direction}"
-            for mask in masks
-            for direction in directions
-        )
-        expected.update(f"hyproled-shift-{direction}" for direction in directions)
-
-        actual = {path.stem for path in ICONS.glob("hyproled-*.svg")}
+    def test_exact_119_compact_icon_names(self):
+        masks = active_masks() | {"0000"}
+        expected = {"hyproled-off.svg", "hyproled-error.svg"}
+        for mask in masks:
+            expected.add(icon_name(mask))
+            expected.update(icon_name(mask, direction) for direction in DIRECTIONS)
+        actual = {path.name for path in ICONS.glob("hyproled-*.svg")}
+        self.assertEqual(len(masks), 13)
         self.assertEqual(len(expected), 119)
         self.assertEqual(actual, expected)
+        self.assertTrue((ICONS / "hyproled-1110.svg").is_file())
+        self.assertTrue((ICONS / "hyproled-1110-SE.svg").is_file())
+        self.assertTrue((ICONS / "hyproled-0000-SE.svg").is_file())
+        self.assertFalse((ICONS / "hyproled-1110-C.svg").exists())
+        self.assertFalse((ICONS / "hyproled-PS-SE.svg").exists())
 
-    def test_each_svg_sector_matches_its_glsl_position(self):
-        for phase in range(4):
-            for count in (1, 2, 3):
-                mask = shader_mask(phase, count)
-                root = read_svg(f"hyproled-mask-{mask}-shift-center.svg")
+    def test_center_icons_have_no_direction_ring_and_keep_original_mask(self):
+        for mask in active_masks() | {"0000"}:
+            root = read_svg(icon_name(mask))
+            self.assertEqual(root.attrib.get("viewBox"), "0 0 28 28")
+            groups = list(root.iter(f"{SVG_NS}g"))
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0].attrib.get("transform"), "translate(2 2)")
+            paths = {
+                element.attrib.get("id"): element
+                for element in root.iter(f"{SVG_NS}path")
+            }
+            self.assertIn("outer-ring", paths)
+            self.assertIn("grid-vertical", paths)
+            self.assertIn("grid-horizontal", paths)
+            self.assertNotIn("opacity", paths["outer-ring"].attrib)
+            self.assertFalse(any(name.startswith("direction-") for name in paths))
+            bits = int(mask, 2)
+            for pos, prefix in EXPECTED_SECTOR_PREFIX.items():
+                path = paths.get(f"pixel-{pos}")
+                self.assertEqual(path is not None, bool(bits & (1 << pos)), (mask, pos))
+                if path is not None:
+                    self.assertTrue(path.attrib["d"].startswith(prefix), (mask, pos))
 
-                self.assertEqual(
-                    root.attrib.get("viewBox"),
-                    "0 0 24 24",
-                )
-
+    def test_all_directional_assets_have_one_highlighted_sector(self):
+        for mask in active_masks() | {"0000"}:
+            for selected in DIRECTIONS:
+                root = read_svg(icon_name(mask, selected))
+                self.assertEqual(root.attrib.get("viewBox"), "0 0 28 28")
                 paths = {
                     element.attrib.get("id"): element
                     for element in root.iter(f"{SVG_NS}path")
                 }
-
-                bits = int(mask, 2)
-
                 self.assertIn("outer-ring", paths)
-                self.assertIn("grid-vertical", paths)
-                self.assertIn("grid-horizontal", paths)
-                for direction in (
-                    "north", "north-east", "east", "south-east",
-                    "south", "south-west", "west", "north-west",
-                ):
-                    self.assertIn(f"direction-{direction}", paths)
-                    self.assertEqual(paths[f"direction-{direction}"].attrib["opacity"], "0.08")
+                self.assertNotIn("opacity", paths["outer-ring"].attrib)
+                for direction in DIRECTIONS:
+                    path = paths[f"direction-{direction}"]
+                    expected = "1" if direction == selected else "0.30"
+                    self.assertEqual(path.attrib["opacity"], expected, (mask, selected, direction))
+                    # The compass ring is outside the central 2x2 mask ring.
+                    self.assertIn("13.15", path.attrib["d"])
+                    self.assertIn("11.35", path.attrib["d"])
 
-                for element in paths.values():
-                    self.assertEqual(
-                        element.attrib.get("class"),
-                        "success",
-                    )
-
-                for pos, expected_prefix in EXPECTED_SECTOR_PREFIX.items():
-                    path = paths.get(f"pixel-{pos}")
-                    should_be_filled = bool(bits & (1 << pos))
-
-                    self.assertEqual(
-                        path is not None,
-                        should_be_filled,
-                        (mask, pos),
-                    )
-
-                    if path is not None:
-                        self.assertTrue(
-                            path.attrib["d"].startswith(expected_prefix),
-                            (mask, pos, path.attrib["d"]),
-                        )
-
-    def test_directional_and_shift_only_icons(self):
-        directions = (
-            "center", "north", "north-east", "east", "south-east",
-            "south", "south-west", "west", "north-west",
+    def test_generated_css_maps_every_icon_and_only_generated_icons(self):
+        source = CSS.read_text(encoding="utf-8")
+        pattern = re.compile(
+            r'(?m)^#custom-hyproled(?P<classes>(?:\.[A-Za-z0-9-]+)+) \{\n'
+            r'  background-image: -gtk-recolor\(\n'
+            r'    url\("@HYPROLED_ICON_DIR@/(?P<file>hyproled-[^"]+\.svg)"\),\n'
+            r'    success @base0D, warning @base04, error @base08\n'
+            r'  \);\n\}'
         )
-        compass = directions[1:]
-
-        masks = {
-            shader_mask(phase, count)
-            for phase in range(4)
-            for count in (1, 2, 3)
+        matches = list(pattern.finditer(source))
+        self.assertEqual(len(matches), 117)
+        actual = {}
+        for match in matches:
+            classes = set(match.group("classes").split(".")[1:])
+            masks = [value.removeprefix("mask-") for value in classes if value.startswith("mask-")]
+            dirs = [value.removeprefix("pixel-shift-direction-") for value in classes if value.startswith("pixel-shift-direction-")]
+            self.assertEqual(len(masks), 1, match.group(0))
+            self.assertLessEqual(len(dirs), 1, match.group(0))
+            direction = dirs[0] if dirs else "center"
+            actual[match.group("file")] = (masks[0], direction)
+        expected = {
+            icon_name(mask, direction): (mask, direction)
+            for mask in (active_masks() | {"0000"})
+            for direction in ("center", *DIRECTIONS)
         }
+        self.assertEqual(actual, expected)
+        self.assertIn("Generated by scripts/generate-icons.py", source)
 
-        for mask in masks:
-            for selected in directions:
-                root = read_svg(
-                    f"hyproled-mask-{mask}-shift-{selected}.svg"
-                )
-                paths = {
-                    element.attrib.get("id"): element
-                    for element in root.iter(f"{SVG_NS}path")
-                }
-
-                for direction in compass:
-                    expected_opacity = (
-                        "1" if direction == selected else "0.08"
-                    )
-                    self.assertEqual(
-                        paths[f"direction-{direction}"].attrib["opacity"],
-                        expected_opacity,
-                        (mask, selected, direction),
-                    )
-
-        for selected in directions:
-            root = read_svg(f"hyproled-shift-{selected}.svg")
-            elements = {element.attrib.get("id"): element for element in root.iter()}
-            self.assertIn("shift-center", elements)
-            self.assertNotIn("grid-vertical", elements)
-            self.assertNotIn("grid-horizontal", elements)
-
-            for direction in compass:
-                path = elements[f"direction-{direction}"]
-                expected_opacity = "1" if direction == selected else "0.08"
-                self.assertEqual(path.attrib["opacity"], expected_opacity)
-
-        combined = read_svg("hyproled-mask-1000-shift-south-east.svg")
-        combined_ids = {element.attrib.get("id") for element in combined.iter()}
-        self.assertIn("pixel-3", combined_ids)
-        self.assertNotIn("shift-center", combined_ids)
-
-    def test_off_and_error_icons(self):
-        off_root = read_svg("hyproled-off.svg")
-        error_root = read_svg("hyproled-error.svg")
-
-        off = {
-            element.attrib.get("id")
-            for element in off_root.iter(f"{SVG_NS}path")
-        }
-
-        error = {
-            element.attrib.get("id")
-            for element in error_root.iter(f"{SVG_NS}path")
-        }
-
-        self.assertEqual(
-            off,
-            {"outer-ring", "grid-vertical", "grid-horizontal"},
-        )
-
-        self.assertEqual(
-            error,
-            {"outer-ring", "error-mark"},
-        )
-
-        self.assertEqual(
-            {element.attrib.get("class")
-             for element in off_root.iter(f"{SVG_NS}path")},
-            {"warning"},
-        )
-
-        self.assertEqual(
-            {element.attrib.get("class")
-             for element in error_root.iter(f"{SVG_NS}path")},
-            {"error"},
-        )
+    def test_off_and_error_special_icons(self):
+        off = read_svg("hyproled-off.svg")
+        error = read_svg("hyproled-error.svg")
+        self.assertEqual(off.attrib.get("viewBox"), "0 0 28 28")
+        self.assertEqual(error.attrib.get("viewBox"), "0 0 28 28")
+        off_paths = {e.attrib.get("id") for e in off.iter(f"{SVG_NS}path")}
+        error_paths = {e.attrib.get("id") for e in error.iter(f"{SVG_NS}path")}
+        self.assertEqual(off_paths, {"outer-ring", "grid-vertical", "grid-horizontal"})
+        self.assertEqual(error_paths, {"outer-ring", "error-mark"})
+        self.assertEqual({e.attrib.get("class") for e in off.iter(f"{SVG_NS}path")}, {"warning"})
+        self.assertEqual({e.attrib.get("class") for e in error.iter(f"{SVG_NS}path")}, {"error"})
 
     def test_generator_check_mode(self):
         result = subprocess.run(
@@ -251,84 +200,41 @@ class IconGenerationTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
-
-        self.assertEqual(
-            result.returncode,
-            0,
-            result.stdout + result.stderr,
-        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
-@unittest.skipUnless(
-    shutil.which("jq"),
-    "jq is required for hyproled --status tests",
-)
+@unittest.skipUnless(shutil.which("jq"), "jq is required for hyproled --status tests")
 class StatusMaskTests(unittest.TestCase):
-    def test_status_mask_class_matches_shader_and_svg_names(self):
+    def test_status_mask_class_matches_shader_and_compact_icon_names(self):
         with tempfile.TemporaryDirectory() as runtime_dir:
             state_dir = Path(runtime_dir) / "hyproled"
             state_dir.mkdir()
-
             state_path = state_dir / "state.json"
-
             env = os.environ.copy()
             env["XDG_RUNTIME_DIR"] = runtime_dir
-
             state = {
-                "version": 2,
-                "status": "active",
-                "phase": 0,
-                "offPixels": 1,
-                "monitor": 0,
-                "area": None,
-                "invert": False,
-                "brightnessOriginal": 100,
-                "brightnessMax": 528,
-                "brightnessApplied": 110,
-                "brightnessDevice": "intel_backlight",
-                "activeShader": "/tmp/hyproled-test.glsl",
-                "previousShader": "",
-                "compensationPercent": 10,
-                "brightnessEnabled": True,
-                "compensationPercentOfMaxByPixelCount": {
-                    "1": 10,
-                    "2": 20,
-                    "3": 30,
-                },
+                "version": 2, "status": "active", "phase": 0,
+                "offPixels": 1, "monitor": 0, "area": None, "invert": False,
+                "brightnessOriginal": 100, "brightnessMax": 528,
+                "brightnessApplied": 110, "brightnessDevice": "intel_backlight",
+                "activeShader": "/tmp/hyproled-test.glsl", "previousShader": "",
+                "compensationPercent": 10, "brightnessEnabled": True,
+                "compensationPercentOfMaxByPixelCount": {"1": 10, "2": 20, "3": 30},
             }
-
             for phase in range(4):
                 for count in (1, 2, 3):
-                    state["phase"] = phase
-                    state["offPixels"] = count
-
-                    state_path.write_text(
-                        json.dumps(state),
-                        encoding="utf-8",
-                    )
-
+                    state["phase"], state["offPixels"] = phase, count
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
                     result = subprocess.run(
-                        [str(HYPROLED), "--status"],
-                        cwd=ROOT,
-                        env=env,
-                        text=True,
-                        capture_output=True,
+                        [str(HYPROLED), "--status"], cwd=ROOT, env=env,
+                        text=True, capture_output=True,
                     )
-
                     self.assertEqual(result.returncode, 0, result.stderr)
-
                     payload = json.loads(result.stdout)
                     expected_mask = shader_mask(phase, count)
-
-                    self.assertIn(
-                        f"mask-{expected_mask}",
-                        payload["class"],
-                    )
-
+                    self.assertIn(f"mask-{expected_mask}", payload["class"])
                     self.assertIn("pixel-shift-direction-center", payload["class"])
-                    self.assertTrue(
-                        (ICONS / f"hyproled-mask-{expected_mask}-shift-center.svg").is_file()
-                    )
+                    self.assertTrue((ICONS / icon_name(expected_mask)).is_file())
 
 
 if __name__ == "__main__":

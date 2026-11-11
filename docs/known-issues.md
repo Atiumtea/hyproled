@@ -66,7 +66,7 @@ Running multiple independent applications that modify the screen shader is there
 
 **Affected component:** Optional Waybar integration
 
-The generated SVG set covers all 12 mask patterns combined with nine Pixel Shift direction states, as well as all nine Pixel Shift-only states.
+The generated icon set contains 119 SVGs: each of the 12 active mask patterns has one shared center/no-shift icon and eight directional variants. The `0000` mask reuses the same naming scheme for Pixel Shift-only operation; its center state is `hyproled-0000.svg`, and directional states use the compact `N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, and `NW` suffixes. No separate center or Pixel Shift-only filename is needed.
 
 The direction indicator is derived from the actual production `(dx,dy)` vector. The physical X/Y orientation was checked on the ThinkPad X1 Extreme Gen 2 OLED panel (+X moves the image right; +Y moves it down); the eight compass directions are derived from that mapping. Other displays or compositor configurations may require separate orientation validation.
 
