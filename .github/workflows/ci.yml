@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Tests and checks (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+            arch: x86_64
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            jq \
+            glslang-tools \
+            python3-jsonschema
+
+      - name: Verify native architecture and test tools
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          actual_arch="$(uname -m)"
+
+          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "::error::Expected native architecture $EXPECTED_ARCH, found $actual_arch"
+            exit 1
+          fi
+
+          command -v bash
+          command -v python3
+          command -v jq
+          command -v glslangValidator
+          python3 -c 'import jsonschema'
+
+      - name: Check Bash syntax
+        run: |
+          bash -n ./hyproled
+
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find ./examples -type f -name '*.sh' -print0)
+
+      - name: Verify executable mode
+        run: |
+          test -x ./hyproled
+
+          mode="$(git ls-files --stage -- hyproled | awk 'NR == 1 { print $1 }')"
+
+          if [[ "$mode" != "100755" ]]; then
+            echo "::error::hyproled must be committed with mode 100755 (found: ${mode:-missing})"
+            exit 1
+          fi
+
+      - name: Verify generated icons
+        run: python3 scripts/generate-icons.py --check
+
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -v
+
+  nix-package:
+    name: Nix package (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32
+
+      - name: Verify native Nix system
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.system }}
+        run: |
+          actual_system="$(nix eval --impure --raw --expr 'builtins.currentSystem')"
+
+          if [[ "$actual_system" != "$EXPECTED_SYSTEM" ]]; then
+            echo "::error::Expected native Nix system $EXPECTED_SYSTEM, found $actual_system"
+            exit 1
+          fi
+
+      - name: Check Flake outputs
+        run: nix flake check --no-build
+
+      - name: Build package and verify its version
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.system }}
+        run: |
+          expected_version="$(< version.txt)"
+          package_version="$(nix eval --raw ".#packages.${EXPECTED_SYSTEM}.hyproled.version")"
+          package_path="$(nix build --no-link --print-out-paths ".#packages.${EXPECTED_SYSTEM}.hyproled")"
+          runtime_version="$("$package_path/bin/hyproled" --version)"
+
+          if [[ "$package_version" != "$expected_version" ]]; then
+            echo "::error::Nix package version mismatch: expected $expected_version, found $package_version"
+            exit 1
+          fi
+
+          if [[ "$runtime_version" != "hyproled $expected_version" ]]; then
+            echo "::error::Installed CLI version mismatch: expected hyproled $expected_version, found $runtime_version"
+            exit 1
+          fi
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes shellcheck
+
+      - name: Run ShellCheck
+        shell: bash
+        run: |
+          mapfile -d '' scripts < <(
+            find . -type f -name '*.sh' -not -path './.git/*' -print0
+          )
+
+          shellcheck --shell=bash ./hyproled "${scripts[@]}"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+
+      - name: Install actionlint
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+
+          GOBIN="$RUNNER_TEMP/bin" \
+            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Check GitHub Actions workflows
+        run: actionlint -color
+
+  workflow-security:
+    name: Workflow security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+
+          "$RUNNER_TEMP/zizmor/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --only-binary=:all: \
+            "zizmor==1.32.0"
+
+      - name: Audit workflow definitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/zizmor/bin/zizmor" \
+            --strict-collection \
+            --format=github \
+            .github/workflows
