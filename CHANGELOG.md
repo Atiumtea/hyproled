@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/Atiumtea/hyproled/compare/v0.3.0...v0.4.0) (2026-11-22)
+
+
+### Miscellaneous Chores
+
+* bootstrap 0.4.0 release ([14c4858](https://github.com/Atiumtea/hyproled/commit/14c4858f905dfb794b7bb24fe7a2bc18aa4f4e02))
+* bootstrap 0.4.0 release ([3b31db2](https://github.com/Atiumtea/hyproled/commit/3b31db2829769a3eee9d49140dc6b390f8bf9627))
+
 ## [0.3.0](https://github.com/Atiumtea/hyproled/compare/v0.2.0...v0.3.0) (2026-11-21)
 
 ### Features
