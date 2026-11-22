@@ -46,7 +46,7 @@ docs: describe the Waybar module
 
 Use the usual types (`feat`, `fix`, `perf`, `docs`, `test`, `build`, `ci`, `chore`) and write the subject in the imperative. Mark breaking changes with `!` and/or a `BREAKING CHANGE:` footer.
 
-Use a clear pull-request title. Pull requests are normally squash-merged, and the resulting commit title is consumed by Release Please. Do not edit `CHANGELOG.md`, bump `version.txt`, or create tags as part of an ordinary feature or fix pull request; see the [release process](.github/DEPLOYMENT.md).
+Use a clear pull-request title. Pull requests are merged with merge commits. Keep individual commits Conventional Commit-compliant; Release Please reads the commit history on `main` since the previous release. Do not edit `CHANGELOG.md`, bump `version.txt`, or create tags as part of an ordinary feature or fix pull request; see the [release process](.github/DEPLOYMENT.md).
 
 A pull request should explain the reason for the change, user-visible behavior, and tests performed. Include relevant issue references and update documentation where needed.
 

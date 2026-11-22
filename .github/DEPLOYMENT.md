@@ -4,7 +4,7 @@ Releases are managed by [Release Please](https://github.com/googleapis/release-p
 
 ## Release flow
 
-1. Merge changes into `main` using Conventional Commit messages. Pull requests are normally squash-merged; the resulting commit title must describe the change (`feat:`, `fix:`, `perf:`, and so on).
+1. Merge changes into `main` using merge commits. Keep individual pull-request commits Conventional Commit-compliant (`feat:`, `fix:`, `perf:`, and so on); Release Please reads the commit history on `main` since the previous release.
 2. The `Release Please` workflow opens or updates a release pull request when the commit history requires a release.
 3. Review the generated version and changelog. Merge the release pull request.
 4. Release Please updates `version.txt` and `CHANGELOG.md`, creates the version tag, and publishes the GitHub Release.
